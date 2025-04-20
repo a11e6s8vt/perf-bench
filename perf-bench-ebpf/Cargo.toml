@@ -1,0 +1,18 @@
+[package]
+name = "perf-bench-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+perf-bench-common = { path = "../perf-bench-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+memoffset = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "perf-bench"
+path = "src/main.rs"
