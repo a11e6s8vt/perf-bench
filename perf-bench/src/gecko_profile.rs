@@ -1,9 +1,23 @@
+use aya::maps::StackTraceMap;
+use aya::util::kernel_symbols;
+use aya::Ebpf;
+use blazesym::symbolize::{
+    source::{Process, Source},
+    CodeInfo, Input, Sym, Symbolize, Symbolized, Symbolizer,
+};
+use blazesym::Pid;
+
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 use std::cmp::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::symbols::StackFrameInfo;
+
+pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 #[derive(Debug)]
 pub struct ProfileBuilder {
@@ -194,8 +208,13 @@ impl ThreadBuilder {
         self.index
     }
 
-    pub fn add_sample(&mut self, timestamp: f64, frames: &[u64], cpu_delta: u64) -> Option<usize> {
-        let stack_index = self.stack_index_for_frames(frames);
+    pub fn add_sample(
+        &mut self,
+        timestamp: f64,
+        stack_frames: &Vec<StackFrameInfo>,
+        cpu_delta: u64,
+    ) -> Option<usize> {
+        let stack_index = self.stack_index_for_frames(&stack_frames);
         self.samples.0.push(Sample {
             timestamp,
             stack_index,
@@ -221,17 +240,17 @@ impl ThreadBuilder {
         self.end_time = Some(end_time);
     }
 
-    fn stack_index_for_frames(&mut self, frames: &[u64]) -> Option<usize> {
-        let frame_indexes: Vec<_> = frames
+    fn stack_index_for_frames(&mut self, stack_frames: &Vec<StackFrameInfo>) -> Option<usize> {
+        let frame_indexes: Vec<_> = stack_frames
             .iter()
-            .map(|&address| self.frame_index_for_address(address))
+            .map(|f| self.frame_index_for_address(f))
             .collect();
         self.stack_table.index_for_frames(&frame_indexes)
     }
 
-    fn frame_index_for_address(&mut self, address: u64) -> usize {
+    fn frame_index_for_address(&mut self, frame: &StackFrameInfo) -> usize {
         self.frame_table
-            .index_for_frame(&mut self.string_table, address)
+            .index_for_frame(&mut self.string_table, frame)
     }
 
     fn to_json(&self, process_name: &str) -> Value {
@@ -369,11 +388,15 @@ impl FrameTable {
         }
     }
 
-    pub fn index_for_frame(&mut self, string_table: &mut StringTable, address: u64) -> usize {
+    pub fn index_for_frame(
+        &mut self,
+        string_table: &mut StringTable,
+        frame: &StackFrameInfo,
+    ) -> usize {
         let frames = &mut self.frames;
-        *self.index.entry(address).or_insert_with(|| {
+        *self.index.entry(frame.address).or_insert_with(|| {
             let frame_index = frames.len();
-            let location_string = format!("0x{:x}", address);
+            let location_string = frame.fmt_symbol();
             let location_string_index = string_table.index_for_string(&location_string);
             frames.push(location_string_index);
             frame_index

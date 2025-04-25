@@ -13,13 +13,15 @@ unsafe impl aya::Pod for LogEvent {}
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sample {
+    pub cpu: u32,
     pub timestamp: u64,
     pub cpu_delta: u64,
     pub pid: i32,
     pub tid: i32,
     pub is_on_cpu: u32,
     pub off_cpu_sample_count: u32,
-    pub stack_id: i64,
+    pub kernel_stack_id: i64,
+    pub user_stack_id: i64,
     pub thread_name: [i8; 16],
 }
 

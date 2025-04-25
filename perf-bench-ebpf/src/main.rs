@@ -34,8 +34,11 @@ struct ThreadTimingData {
     cpu_delta_since_last_sample_ns: u64,
     /// set to the current timestamp on on/sample/off
     last_seen_ts: u64,
-    /// set to the current stack when going off
-    stack_when_going_off: i64,
+    /// set to the current user stack when going off
+    user_stack_when_going_off: i64,
+
+    /// set to the kernel user stack when going off
+    kernel_stack_when_going_off: i64,
 }
 
 #[map(name = "EVENTS")]
@@ -44,13 +47,13 @@ static mut EVENTS: PerfEventArray<LogEvent> = PerfEventArray::<LogEvent>::new(0)
 #[map(name = "SAMPLES")]
 static mut SAMPLES: PerfEventArray<Sample> = PerfEventArray::<Sample>::new(0);
 
-#[map(name = "STACKS")]
-static mut STACKS: StackTrace = StackTrace::with_max_entries(102400, 0);
+#[map(name = "STACK_TRACES")]
+static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(102400, 0);
 
 #[map(name = "THREAD_TIMING")]
 static mut THREAD_TIMING: HashMap<i32, ThreadTimingData> = HashMap::with_max_entries(1024, 0);
 
-static SAMPLE_PERIOD_NS: u64 = 1000000;
+static SAMPLE_PERIOD_NS: u64 = 999999;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -66,7 +69,8 @@ fn get_thread_timing(pid: i32, now: u64, active: bool) -> ThreadTimingData {
             off_cpu_wrapping_counter_ns: 0,
             cpu_delta_since_last_sample_ns: 0,
             last_seen_ts: now,
-            stack_when_going_off: -1,
+            user_stack_when_going_off: -1,
+            kernel_stack_when_going_off: -1,
         },
     }
 }
@@ -78,6 +82,7 @@ fn set_thread_timing(pid: i32, timing: &ThreadTimingData) {
 
 #[inline(always)]
 fn thread_goes_on(ctx: &impl EbpfContext, pid: i32, tgid: i32, now: u64, comm: &[c_char; 16usize]) {
+    let cpu = unsafe { bpf_get_smp_processor_id() };
     let mut timing = get_thread_timing(pid, now, false);
     let sleep_time: u64 = now - timing.last_seen_ts;
     timing.off_cpu_wrapping_counter_ns += sleep_time;
@@ -85,13 +90,15 @@ fn thread_goes_on(ctx: &impl EbpfContext, pid: i32, tgid: i32, now: u64, comm: &
     if off_cpu_sample_count > 0 {
         timing.off_cpu_wrapping_counter_ns -= off_cpu_sample_count * SAMPLE_PERIOD_NS;
         let sample = Sample {
+            cpu,
             timestamp: now,
             cpu_delta: timing.cpu_delta_since_last_sample_ns,
             pid: tgid,
             tid: pid,
             is_on_cpu: 0,
             off_cpu_sample_count: off_cpu_sample_count as u32,
-            stack_id: timing.stack_when_going_off,
+            user_stack_id: timing.user_stack_when_going_off,
+            kernel_stack_id: timing.kernel_stack_when_going_off,
             thread_name: comm.clone(),
         };
         unsafe { SAMPLES.output(ctx, &sample, 0) };
@@ -109,8 +116,12 @@ fn thread_goes_off(ctx: &impl EbpfContext, pid: i32, _tgid: i32, now: u64) {
     timing.cpu_delta_since_last_sample_ns += on_cpu_time_delta;
     timing.last_seen_ts = now;
     timing.active = 0;
-    timing.stack_when_going_off = match unsafe { STACKS.get_stackid(ctx, BPF_F_USER_STACK.into()) }
-    {
+    timing.user_stack_when_going_off =
+        match unsafe { STACK_TRACES.get_stackid(ctx, BPF_F_USER_STACK.into()) } {
+            Ok(stack) => stack,
+            Err(e) => e,
+        };
+    timing.kernel_stack_when_going_off = match unsafe { STACK_TRACES.get_stackid(ctx, 0) } {
         Ok(stack) => stack,
         Err(e) => e,
     };
@@ -120,6 +131,7 @@ fn thread_goes_off(ctx: &impl EbpfContext, pid: i32, _tgid: i32, now: u64) {
 #[inline(always)]
 fn thread_gets_sampled_while_on(
     ctx: &impl EbpfContext,
+    cpu: u32,
     pid: i32,
     tgid: i32,
     now: u64,
@@ -131,18 +143,24 @@ fn thread_gets_sampled_while_on(
     }
     let on_cpu_time_delta = now - timing.last_seen_ts;
     timing.cpu_delta_since_last_sample_ns += on_cpu_time_delta;
-    let stack_id = match unsafe { STACKS.get_stackid(ctx, BPF_F_USER_STACK.into()) } {
+    let user_stack_id = match unsafe { STACK_TRACES.get_stackid(ctx, BPF_F_USER_STACK.into()) } {
+        Ok(stack) => stack,
+        Err(e) => e,
+    };
+    let kernel_stack_id = match unsafe { STACK_TRACES.get_stackid(ctx, 0) } {
         Ok(stack) => stack,
         Err(e) => e,
     };
     let sample = Sample {
+        cpu,
         timestamp: now,
         cpu_delta: timing.cpu_delta_since_last_sample_ns,
         pid: tgid,
         tid: pid,
         is_on_cpu: 1,
         off_cpu_sample_count: 0,
-        stack_id,
+        user_stack_id,
+        kernel_stack_id,
         thread_name: comm.clone(),
     };
     unsafe { SAMPLES.output(ctx, &sample, 0) };
@@ -217,12 +235,13 @@ pub fn cpu_clock(ctx: PerfEventContext) -> u32 {
         return 0;
     }
 
+    let cpu = unsafe { bpf_get_smp_processor_id() };
     let now = unsafe { bpf_ktime_get_ns() };
     let comm: [i8; 16] = match bpf_get_current_comm() {
         Ok(comm) => unsafe { core::mem::transmute(comm) },
         Err(_) => return 0,
     };
-    thread_gets_sampled_while_on(&ctx, ctx.pid() as i32, ctx.tgid() as i32, now, &comm);
+    thread_gets_sampled_while_on(&ctx, cpu, ctx.pid() as i32, ctx.tgid() as i32, now, &comm);
 
     // let stack_id = match unsafe {
     //     bpf_probe_read(ctx.as_ptr().offset(offset_of!(pt_regs, ip) as isize) as *const u64)

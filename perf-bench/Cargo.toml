@@ -9,6 +9,8 @@ perf-bench-common = { path = "../perf-bench-common", features = ["user"] }
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
 aya-log = { workspace = true }
+addr2line = { workspace = true }
+blazesym = { workspace = true }
 bytes = { workspace = true }
 env_logger = { workspace = true }
 futures = { workspace = true }
@@ -18,8 +20,10 @@ log = { workspace = true }
 memmap2 = { workspace = true }
 object = { workspace = true, features = ["std", "read_core", "elf", "unaligned"] } 
 proc-maps = { workspace = true }
+procfs = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
 

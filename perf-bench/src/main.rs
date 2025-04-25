@@ -1,5 +1,10 @@
+mod cache;
 mod gecko_profile;
+mod process;
+mod profiler;
+mod symbols;
 
+use crate::profiler::Profiler;
 use aya::{
     maps::{
         perf::{AsyncPerfEventArray, PerfBufferError},
@@ -40,7 +45,14 @@ use uuid::Uuid;
 
 use perf_bench_common::{LogEvent, Sample};
 
-#[derive(Debug, Serialize)]
+pub struct StackInfo {
+    pub tgid: i32,
+    pub user_stack_id: i64,
+    pub kernel_stack_id: i64,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct Thread {
     tid: i32,
     pid: Option<i32>,
@@ -48,11 +60,12 @@ struct Thread {
     samples: Vec<Sample2>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct Sample2 {
     timestamp: u64,
     cpu_delta: u64,
-    stack_id: i64,
+    user_stack_id: i64,
+    kernel_stack_id: i64,
     on_cpu: bool,
 }
 
@@ -120,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
 
     // This will raise scheduled events on each CPU at 1000000 HZ, triggered by the kernel based
     // on clock ticks.
-    const SAMPLE_PERIOD: u64 = 1000000;
+    const SAMPLE_PERIOD: u64 = 999999;
     let program_perf_event: &mut PerfEvent =
         ebpf_guard.program_mut("cpu_clock").unwrap().try_into()?;
     program_perf_event.load()?;
@@ -135,7 +148,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut perf_array = AsyncPerfEventArray::try_from(ebpf_guard.take_map("SAMPLES").unwrap())?;
-    let stacks = StackTraceMap::try_from(ebpf_guard.take_map("STACKS").unwrap())?;
+    let stacks_traces = StackTraceMap::try_from(ebpf_guard.take_map("STACK_TRACES").unwrap())?;
+
+    let mut profiler = Profiler::new();
 
     let (tx_pids, mut rx_pids) = mpsc::channel(32);
     let (termination_signal_sender, rx) = watch::channel(false);
@@ -200,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
                         let events = events?;
                         for buf in buffers.iter_mut().take(events.read) {
                             let data = unsafe { (buf.as_ptr() as *const Sample).read_unaligned() };
-                            let mut thread_entry = thread_samples.entry(data.tid).or_insert_with(|| {
+                            let thread_entry = thread_samples.entry(data.tid).or_insert_with(|| {
                                 Thread {
                                     tid: data.tid,
                                     pid: None,
@@ -231,7 +246,8 @@ async fn main() -> anyhow::Result<()> {
                                 thread_entry.samples.push(Sample2{
                                     timestamp: data.timestamp,
                                     cpu_delta: data.cpu_delta,
-                                    stack_id: data.stack_id,
+                                    user_stack_id: data.user_stack_id,
+                                    kernel_stack_id: data.kernel_stack_id,
                                     on_cpu: true,
                                 });
                                 // println!(
@@ -248,14 +264,16 @@ async fn main() -> anyhow::Result<()> {
                                 thread_entry.samples.push(Sample2{
                                     timestamp: first_timestamp,
                                     cpu_delta: data.cpu_delta,
-                                    stack_id: data.stack_id,
+                                    user_stack_id: data.user_stack_id,
+                                    kernel_stack_id: data.kernel_stack_id,
                                     on_cpu: false,
                                 });
                                 for i in 1..count {
                                     thread_entry.samples.push(Sample2{
                                         timestamp: first_timestamp + i * SAMPLE_PERIOD,
                                         cpu_delta: 0,
-                                        stack_id: data.stack_id,
+                                        user_stack_id: data.user_stack_id,
+                                        kernel_stack_id: data.kernel_stack_id,
                                         on_cpu: false,
                                     });
                                 }
@@ -307,8 +325,9 @@ async fn main() -> anyhow::Result<()> {
         start_time,
         start_timestamp_ns,
         threads,
-        &stacks,
+        &stacks_traces,
         proc_maps_by_pid,
+        &mut profiler,
     );
     Ok(())
 }
@@ -366,8 +385,9 @@ fn save_to_profile(
     start_time: Instant,
     start_timestamp_ns: u64,
     threads: Vec<Thread>,
-    stacks: &StackTraceMap<MapData>,
+    stack_traces: &StackTraceMap<MapData>,
     proc_maps_by_pid: HashMap<i32, Vec<MapRange>>,
+    profiler: &mut Profiler,
 ) {
     let mut root_profile_builder =
         ProfileBuilder::new(start_time, "System", 0, Duration::from_millis(1));
@@ -382,7 +402,8 @@ fn save_to_profile(
         &start_time,
         start_timestamp_ns,
         threads_without_pid,
-        stacks,
+        stack_traces,
+        profiler,
     );
 
     for (pid, threads) in threads_by_pid {
@@ -400,7 +421,8 @@ fn save_to_profile(
             &start_time,
             start_timestamp_ns,
             threads,
-            stacks,
+            stack_traces,
+            profiler,
         );
         root_profile_builder.add_subprocess(process_profile_builder);
     }
@@ -415,21 +437,24 @@ fn add_threads_to_profile(
     _process_start_time: &Instant,
     process_start_timestamp_ns: u64,
     threads: Vec<Thread>,
-    stacks: &StackTraceMap<MapData>,
+    stack_traces: &StackTraceMap<MapData>,
+    profiler: &mut Profiler,
 ) {
     for thread in threads {
         profile_builder.add_thread(make_profile_thread(
             thread,
-            stacks,
+            stack_traces,
             process_start_timestamp_ns,
+            profiler,
         ));
     }
 }
 
 fn make_profile_thread(
     thread: Thread,
-    stacks: &StackTraceMap<MapData>,
+    stack_traces: &StackTraceMap<MapData>,
     start_timestamp_ns: u64,
+    profiler: &mut Profiler,
 ) -> ThreadBuilder {
     let mut thread_builder = ThreadBuilder::new(
         thread.pid.unwrap_or(0) as u32,
@@ -439,30 +464,39 @@ fn make_profile_thread(
         false,
     );
 
-    if let Some(name) = thread.name {
+    if let Some(name) = thread.name.clone() {
         thread_builder.set_name(&name);
     }
-
-    let mut stack_map = HashMap::new();
 
     for sample in thread.samples {
         let timestamp_rel_ms = (sample.timestamp - start_timestamp_ns) as f64 / 1_000_000.0;
         let cpu_delta_us = (sample.cpu_delta + 500) / 1_000;
-        match stack_map.get(&sample.stack_id) {
-            Some(stack_index) => {
-                thread_builder.add_sample_same_stack(timestamp_rel_ms, *stack_index, cpu_delta_us);
-            }
-            None => {
-                let trace = stacks.get(&(sample.stack_id as u32), 0);
-                let frames: Vec<u64> = match trace {
-                    Ok(trace) => trace.frames().iter().rev().map(|frame| frame.ip).collect(),
-                    Err(_) => [].into(),
-                };
-                let stack_index =
-                    thread_builder.add_sample(timestamp_rel_ms, &frames, cpu_delta_us);
-                stack_map.insert(sample.stack_id, stack_index);
-            }
-        }
+
+        let stack_info = StackInfo {
+            tgid: thread.tid,
+            user_stack_id: sample.user_stack_id,
+            kernel_stack_id: sample.kernel_stack_id,
+            name: thread.name.clone().unwrap_or("unknown-name".to_string()),
+        };
+
+        let combined = profiler.get_stack(&stack_info, stack_traces);
+        thread_builder.add_sample(timestamp_rel_ms, &combined, cpu_delta_us);
+
+        // match stack_map.get(&sample.stack_id) {
+        //     Some(stack_index) => {
+        //         thread_builder.add_sample_same_stack(timestamp_rel_ms, *stack_index, cpu_delta_us);
+        //     }
+        //     None => {
+        //         let trace = stacks.get(&(sample.stack_id as u32), 0);
+        //         let frames: Vec<u64> = match trace {
+        //             Ok(trace) => trace.frames().iter().rev().map(|frame| frame.ip).collect(),
+        //             Err(_) => [].into(),
+        //         };
+        //         let stack_index =
+        //             thread_builder.add_sample(timestamp_rel_ms, &frames, cpu_delta_us);
+        //         stack_map.insert(sample.stack_id, stack_index);
+        //     }
+        // }
     }
 
     thread_builder
