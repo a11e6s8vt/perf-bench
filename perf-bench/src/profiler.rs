@@ -51,7 +51,7 @@ impl Profiler {
         let ktrace_id = stack_info.kernel_stack_id;
         let utrace_id = stack_info.user_stack_id;
 
-        if stack_info.tgid == 0 {
+        if stack_info.tid == 0 {
             let mut idle = StackFrameInfo::prepare(stack_info);
             idle.symbol = Some("idle".into());
             let mut idle_cpu = StackFrameInfo::process_only(stack_info);

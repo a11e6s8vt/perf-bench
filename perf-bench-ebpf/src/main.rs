@@ -8,10 +8,12 @@
 mod bindings;
 
 use aya_ebpf::bindings::BPF_F_USER_STACK;
+use aya_ebpf::bpf_printk;
 use aya_ebpf::cty::c_char;
 use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_task_btf, bpf_ktime_get_ns, bpf_probe_read,
 };
+use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel};
 use aya_ebpf::macros::map;
 use aya_ebpf::macros::{kprobe, perf_event, tracepoint};
 use aya_ebpf::maps::{HashMap, PerfEventArray, StackTrace};
@@ -21,9 +23,11 @@ use aya_log_ebpf::info;
 use bindings::{
     bpf_perf_event_data, pid_t, pt_regs, task_struct, thread_struct, trace_event_raw_sched_switch,
 };
+use core::ffi::CStr;
 use core::ptr::null;
+
 use memoffset::offset_of;
-use perf_bench_common::{LogEvent, Sample};
+use perf_bench_common::{CommData, LogEvent, Sample, ThreadId};
 
 #[derive(Clone)]
 struct ThreadTimingData {
@@ -40,6 +44,9 @@ struct ThreadTimingData {
     /// set to the kernel user stack when going off
     kernel_stack_when_going_off: i64,
 }
+#[map(name = "THREAD_COMM_MAP")]
+static mut THREAD_COMM_MAP: HashMap<ThreadId, CommData> =
+    HashMap::<ThreadId, CommData>::with_max_entries(102400, 0);
 
 #[map(name = "EVENTS")]
 static mut EVENTS: PerfEventArray<LogEvent> = PerfEventArray::<LogEvent>::new(0);
@@ -53,7 +60,7 @@ static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(102400, 0);
 #[map(name = "THREAD_TIMING")]
 static mut THREAD_TIMING: HashMap<i32, ThreadTimingData> = HashMap::with_max_entries(1024, 0);
 
-static SAMPLE_PERIOD_NS: u64 = 999999;
+static SAMPLE_PERIOD_NS: u64 = 99999;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -81,7 +88,7 @@ fn set_thread_timing(pid: i32, timing: &ThreadTimingData) {
 }
 
 #[inline(always)]
-fn thread_goes_on(ctx: &impl EbpfContext, pid: i32, tgid: i32, now: u64, comm: &[c_char; 16usize]) {
+fn thread_goes_on(ctx: &impl EbpfContext, pid: i32, tgid: i32, now: u64, comm: &[u8; 16usize]) {
     let cpu = unsafe { bpf_get_smp_processor_id() };
     let mut timing = get_thread_timing(pid, now, false);
     let sleep_time: u64 = now - timing.last_seen_ts;
@@ -135,7 +142,7 @@ fn thread_gets_sampled_while_on(
     pid: i32,
     tgid: i32,
     now: u64,
-    comm: &[c_char; 16usize],
+    comm: [u8; 16],
 ) {
     let mut timing = get_thread_timing(pid, now, true);
     if timing.active == 0 {
@@ -173,7 +180,7 @@ fn thread_gets_sampled_while_on(
 pub fn sched_switch(ctx: TracePointContext) -> u32 {
     match unsafe { try_sched_switch(ctx) } {
         Ok(ret) => ret,
-        Err(_e) => 0,
+        Err(_e) => 1,
     }
 }
 
@@ -186,7 +193,8 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
     //     field: ax,
     // };
     // EVENTS.output(&ctx, &log_event, 0);
-
+    // prev_pid: PID of the task being switched out (losing CPU).
+    // next_pid: PID of the task being switched in (gaining CPU).
     let prev_pid = bpf_probe_read(
         ctx.as_ptr()
             .offset(offset_of!(trace_event_raw_sched_switch, prev_pid) as isize)
@@ -208,10 +216,21 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
         let next_comm = bpf_probe_read(
             ctx.as_ptr()
                 .offset(offset_of!(trace_event_raw_sched_switch, next_comm) as isize)
-                as *const [c_char; 16usize],
+                as *const [u8; 16usize],
         )?;
-        let next_comm = [0; 16];
-        let next_tgid = 0; // TODO
+        // Capture current tgid from current task
+        let next_pid_tgid = bpf_get_current_pid_tgid();
+        let next_tgid = (next_pid_tgid >> 32) as i32;
+
+        let thread_id = ThreadId { tid: next_pid };
+        let comm_data = CommData {
+            pid: next_tgid,
+            comm: next_comm,
+        };
+
+        unsafe {
+            THREAD_COMM_MAP.insert(&thread_id, &comm_data, 0)?;
+        }
         thread_goes_on(&ctx, next_pid, next_tgid, now, &next_comm);
     }
     // // let stack_id = match STACKS.get_stackid(&ctx, BPF_F_USER_STACK.into()) {
@@ -230,18 +249,36 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
 }
 
 #[perf_event]
-pub fn cpu_clock(ctx: PerfEventContext) -> u32 {
+pub fn cpu_clock(ctx: PerfEventContext) -> Result<u32, i64> {
     if ctx.pid() == 0 {
-        return 0;
+        return Ok(0);
     }
 
     let cpu = unsafe { bpf_get_smp_processor_id() };
     let now = unsafe { bpf_ktime_get_ns() };
-    let comm: [i8; 16] = match bpf_get_current_comm() {
-        Ok(comm) => unsafe { core::mem::transmute(comm) },
-        Err(_) => return 0,
+    // let comm: [u8; 16] = match bpf_get_current_comm() {
+    //     // Ok(comm) => unsafe { core::mem::transmute(comm) },
+    //     Ok(comm) => comm,
+    //     Err(_) => return 0,
+    // };
+    let task = unsafe { bpf_get_current_task_btf() as *const task_struct };
+    if task.is_null() {
+        return Err(1);
+    }
+
+    // The thread ID (TID). Unique for each thread.
+    let pid = unsafe { bpf_probe_read_kernel(&(*task).pid)? };
+
+    // The process ID (PID). Same for all threads of the same process.
+    let tgid = unsafe { bpf_probe_read_kernel(&(*task).tgid)? };
+
+    // Get the comm (process name).
+    let comm = match bpf_get_current_comm() {
+        Ok(c) => c,
+        Err(ret) => return Err(ret),
     };
-    thread_gets_sampled_while_on(&ctx, cpu, ctx.pid() as i32, ctx.tgid() as i32, now, &comm);
+
+    thread_gets_sampled_while_on(&ctx, cpu, ctx.pid() as i32, ctx.tgid() as i32, now, comm);
 
     // let stack_id = match unsafe {
     //     bpf_probe_read(ctx.as_ptr().offset(offset_of!(pt_regs, ip) as isize) as *const u64)
@@ -261,7 +298,7 @@ pub fn cpu_clock(ctx: PerfEventContext) -> u32 {
     //     stack_id,
     // };
     // unsafe { EVENTS.output(&ctx, &switch_entry, 0) };
-    0
+    Ok(0)
 }
 
 #[kprobe]

@@ -118,13 +118,13 @@ impl SymbolFinder {
             .map(|frame| {
                 let address = frame.ip;
 
-                if let Some(info) = self.addr_cache.get(meta.tgid as _, address) {
+                if let Some(info) = self.addr_cache.get(meta.tid as _, address) {
                     return info;
                 }
 
                 let mut info = StackFrameInfo::prepare(meta);
 
-                let process = self.process_cache.get(meta.tgid as usize);
+                let process = self.process_cache.get(meta.tid as usize);
                 if process.is_none() {
                     println!("Empty process cache entry shouldn't happen");
                     return info;
@@ -136,9 +136,9 @@ impl SymbolFinder {
                 }
                 mapper.as_ref().unwrap().lookup(address as _, &mut info);
 
-                info.resolve(address, self, meta.tgid as _);
+                info.resolve(address, self, meta.tid as _);
 
-                self.addr_cache.insert(meta.tgid as _, address, &info);
+                self.addr_cache.insert(meta.tid as _, address, &info);
 
                 info
             })
@@ -193,7 +193,7 @@ impl StackFrameInfo {
     /// Creates an empty/default StackFrameInfo
     pub fn prepare(meta: &StackInfo) -> Self {
         Self {
-            pid: meta.tgid as usize,
+            pid: meta.tid as usize,
             name: meta.name.clone(),
             // "".to_string(), // don't really need meta.get_cmd(),
             ..Default::default()
@@ -206,13 +206,13 @@ impl StackFrameInfo {
         let with_pid = false;
 
         let sym = if with_pid {
-            format!("{} ({})", name, meta.tgid)
+            format!("{} ({})", name, meta.tid)
         } else {
             name.to_owned()
         };
 
         Self {
-            pid: meta.tgid as usize,
+            pid: meta.tid as usize,
             name,
             symbol: Some(sym),
             ..Default::default()
@@ -275,7 +275,7 @@ impl StackFrameInfo {
             // read root path
             let root_link = format!("/proc/{}/root", id);
             let base = Path::new(&root_link);
-            let mut target = match read_link(&base) {
+            let mut target = match read_link(base) {
                 Ok(link) => link,
                 Err(_e) => {
                     // println!("Can't read link {root_link}. Process  {path:?} might have terminated. - {e:?}");
@@ -426,7 +426,7 @@ impl StackFrameInfo {
                 //"[unknown]"
                 format!("{}+{:#x}", self.fmt_object(), self.address).as_str()
             ),
-            self.fmt_source()
+            self.fmt_source(),
         )
     }
 

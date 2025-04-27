@@ -4,6 +4,7 @@ use procfs::process::{MMPermissions, MMapPath, MemoryMap, MemoryMaps, Process, S
 
 use crate::symbols::StackFrameInfo;
 
+#[derive(Debug)]
 pub struct ProcessInfo {
     pub process: Option<Process>,
     pub environ: Option<HashMap<OsString, OsString>>,
@@ -47,6 +48,7 @@ impl ProcessInfo {
                 );
             })
             .ok();
+        println!("{:?}", exe_link);
 
         Self {
             process,
@@ -78,6 +80,7 @@ impl ProcessInfo {
     }
 }
 
+#[derive(Debug)]
 pub struct ProcessMapper {
     maps: Vec<MemoryMap>,
 }

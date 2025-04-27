@@ -2,7 +2,7 @@ use crate::{process::ProcessInfo, symbols::StackFrameInfo};
 use std::collections::HashMap;
 
 /// Process lookup
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ProcessCache {
     map: HashMap<usize, ProcessInfo>,
     total: usize,
@@ -10,6 +10,14 @@ pub struct ProcessCache {
 }
 
 impl ProcessCache {
+    pub fn insert(&mut self, pid: usize) {
+        self.map.entry(pid).or_insert_with(|| {
+            self.miss += 1;
+            ProcessInfo::new(pid)
+        });
+
+        self.total += 1;
+    }
     pub fn get(&mut self, pid: usize) -> Option<&ProcessInfo> {
         self.map.entry(pid).or_insert_with(|| {
             self.miss += 1;

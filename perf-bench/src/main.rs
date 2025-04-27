@@ -5,23 +5,29 @@ mod profiler;
 mod symbols;
 
 use crate::profiler::Profiler;
+use anyhow::anyhow;
 use aya::{
     maps::{
         perf::{AsyncPerfEventArray, PerfBufferError},
-        MapData, StackTraceMap,
+        HashMap as AyaMap, MapData, StackTraceMap,
     },
     programs::{perf_event, KProbe, PerfEvent, PerfEventScope, SamplePolicy, TracePoint},
     util::online_cpus,
     Ebpf,
 };
 use bytes::BytesMut;
+use cache::ProcessCache;
+use futures::{future::join_all, join};
 use gecko_profile::{ProfileBuilder, ThreadBuilder};
 use itertools::Itertools;
 use object::{Object, ObjectSection, SectionKind};
 use proc_maps::MapRange;
+use process::ProcessInfo;
+use procfs::process::Process;
 use serde::{Deserialize, Serialize};
 use serde_json::to_writer;
 use std::cmp;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     convert::{TryFrom, TryInto},
@@ -43,10 +49,12 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use perf_bench_common::{LogEvent, Sample};
+use perf_bench_common::{CommData, LogEvent, Sample, ThreadId};
 
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct StackInfo {
-    pub tgid: i32,
+    /// LWP — thread ID (PID of the individual thread, different from TGID if multi-threaded)
+    pub tid: i32,
     pub user_stack_id: i64,
     pub kernel_stack_id: i64,
     pub name: String,
@@ -54,7 +62,9 @@ pub struct StackInfo {
 
 #[derive(Clone, Debug, Serialize)]
 struct Thread {
+    /// LWP — thread ID (PID of the individual thread, different from TGID if multi-threaded)
     tid: i32,
+    /// PID — process ID (TGID, thread group leader)
     pid: Option<i32>,
     name: Option<String>,
     samples: Vec<Sample2>,
@@ -92,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         concat!(env!("OUT_DIR"), "/perf-bench")
     ))?));
 
+    let mut ebpf1 = ebpf.clone();
     let mut ebpf_guard = ebpf.lock().await;
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf_guard) {
         // This can happen if you remove all log statements from your eBPF program.
@@ -133,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
 
     // This will raise scheduled events on each CPU at 1000000 HZ, triggered by the kernel based
     // on clock ticks.
-    const SAMPLE_PERIOD: u64 = 999999;
+    const SAMPLE_PERIOD: u64 = 99999;
     let program_perf_event: &mut PerfEvent =
         ebpf_guard.program_mut("cpu_clock").unwrap().try_into()?;
     program_perf_event.load()?;
@@ -154,10 +165,12 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx_pids, mut rx_pids) = mpsc::channel(32);
     let (termination_signal_sender, rx) = watch::channel(false);
+    let (termination_signal_sender1, rx1) = watch::channel(false);
 
     let mut rx_proc_maps_termination = rx.clone();
 
     let get_proc_maps = task::spawn(async move {
+        // let mut process_cache = ProcessCache::default();
         let mut proc_maps_by_pid = HashMap::new();
         loop {
             select! {
@@ -167,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 pid = rx_pids.recv() => {
                     if let Some(pid) = pid {
+                        // process_cache.insert(pid as usize);
                         if proc_maps_by_pid.contains_key(&pid) {
                             continue;
                         }
@@ -180,7 +194,26 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        // (proc_maps_by_pid, process_cache)
         proc_maps_by_pid
+    });
+
+    let mut rx_proc_maps_termination1 = rx.clone();
+
+    let get_tid_comm_map = task::spawn(async move {
+        let mut tid_comm_map: HashMap<i32, (i32, String)> = HashMap::new();
+        loop {
+            tokio::select! {
+                _termination_message = rx_proc_maps_termination1.changed() => {
+                        // Terminated.
+                        break;
+                }
+                _ = read_thread_map(ebpf1.clone(), &mut tid_comm_map) => {
+                    println!("Hi");
+                }
+            }
+        }
+        tid_comm_map
     });
 
     let mut join_handles = Vec::new();
@@ -234,10 +267,11 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             if thread_entry.name.is_none() {
-                                let name: Vec<u8> = data.thread_name.iter().map(|s| *s as u8).collect();
-                                if let Ok(name) = CStr::from_bytes_with_nul(&name) {
+                                if let Ok(name) = CStr::from_bytes_with_nul(&data.thread_name) {
                                     if let Ok(name) = name.to_str() {
                                         thread_entry.name = Some(name.to_string());
+                                    } else {
+                                        thread_entry.name = Some(get_thread_name(data.pid, data.tid));
                                     }
                                 }
                             }
@@ -302,10 +336,8 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("bpf is dropped");
     termination_signal_sender.send(true)?;
     eprintln!("termination signal has been sent");
-    let proc_maps_by_pid = get_proc_maps.await?;
-    use std::fs::File;
-    use std::io::{BufWriter, Write};
-    let results = futures::future::join_all(join_handles).await;
+    let (proc_maps_by_pid, tid_comm_map, results) =
+        join!(get_proc_maps, get_tid_comm_map, join_all(join_handles));
     let thread_vecs: Vec<Vec<_>> = results
         .into_iter()
         .filter_map(Result::ok)
@@ -315,8 +347,10 @@ async fn main() -> anyhow::Result<()> {
     // `thread_vecs` contains entries corresponding to each cpu. Merging it
     // into one.
     let threads = merge_threads(thread_vecs);
-    // eprintln!("threads: {:?}", threads);
+    eprintln!("threads: {:?}", tid_comm_map?);
 
+    // use std::fs::File;
+    // use std::io::{BufWriter, Write};
     // let file = File::create("threads.json")?;
     // let mut writer = BufWriter::new(file);
     // serde_json::to_writer(&mut writer, &threads)?;
@@ -326,9 +360,35 @@ async fn main() -> anyhow::Result<()> {
         start_timestamp_ns,
         threads,
         &stacks_traces,
-        proc_maps_by_pid,
+        proc_maps_by_pid?,
         &mut profiler,
     );
+    Ok(())
+}
+
+async fn read_thread_map(
+    ebpf: Arc<Mutex<Ebpf>>,
+    thread_map: &mut HashMap<i32, (i32, String)>,
+) -> anyhow::Result<()> {
+    let mut ebpf_guard = ebpf.lock().await;
+    let thread_comm_ebpf_map: AyaMap<&mut MapData, ThreadId, CommData> = AyaMap::try_from(
+        ebpf_guard
+            .map_mut("THREAD_COMM_MAP")
+            .ok_or(anyhow!("counts not found"))?,
+    )?;
+    let mut thread_map_iter = thread_comm_ebpf_map.iter();
+
+    while let Some(Ok((thread_id, comm_data))) = thread_map_iter.next() {
+        let comm = if let Ok(comm) = CStr::from_bytes_until_nul(&comm_data.comm) {
+            comm.to_string_lossy().to_string()
+        } else {
+            "unnamed".to_string()
+        };
+
+        eprintln!("comm: {:?}", comm.clone());
+        thread_map.insert(thread_id.tid, (comm_data.pid, comm));
+    }
+
     Ok(())
 }
 
@@ -471,32 +531,31 @@ fn make_profile_thread(
     for sample in thread.samples {
         let timestamp_rel_ms = (sample.timestamp - start_timestamp_ns) as f64 / 1_000_000.0;
         let cpu_delta_us = (sample.cpu_delta + 500) / 1_000;
-
+        // println!(
+        //     "thread_id: {:?}, thread name : {:?}",
+        //     thread.tid,
+        //     thread.name.clone().unwrap()
+        // );
         let stack_info = StackInfo {
-            tgid: thread.tid,
+            tid: thread.tid,
             user_stack_id: sample.user_stack_id,
             kernel_stack_id: sample.kernel_stack_id,
-            name: thread.name.clone().unwrap_or("unknown-name".to_string()),
+            name: thread.name.clone().unwrap_or("unnamed".to_string()),
         };
 
-        let combined = profiler.get_stack(&stack_info, stack_traces);
-        thread_builder.add_sample(timestamp_rel_ms, &combined, cpu_delta_us);
+        let mut stack_info_map = HashMap::new();
 
-        // match stack_map.get(&sample.stack_id) {
-        //     Some(stack_index) => {
-        //         thread_builder.add_sample_same_stack(timestamp_rel_ms, *stack_index, cpu_delta_us);
-        //     }
-        //     None => {
-        //         let trace = stacks.get(&(sample.stack_id as u32), 0);
-        //         let frames: Vec<u64> = match trace {
-        //             Ok(trace) => trace.frames().iter().rev().map(|frame| frame.ip).collect(),
-        //             Err(_) => [].into(),
-        //         };
-        //         let stack_index =
-        //             thread_builder.add_sample(timestamp_rel_ms, &frames, cpu_delta_us);
-        //         stack_map.insert(sample.stack_id, stack_index);
-        //     }
-        // }
+        match stack_info_map.get(&stack_info) {
+            Some(stack_index) => {
+                thread_builder.add_sample_same_stack(timestamp_rel_ms, *stack_index, cpu_delta_us);
+            }
+            None => {
+                let combined = profiler.get_stack(&stack_info, stack_traces);
+                let stack_index =
+                    thread_builder.add_sample(timestamp_rel_ms, &combined, cpu_delta_us);
+                stack_info_map.insert(stack_info, stack_index);
+            }
+        }
     }
 
     thread_builder
@@ -631,4 +690,24 @@ fn get_timestamp_ns() -> u64 {
     };
     let _ = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_COARSE, &mut time) };
     (time.tv_sec * 1_000_000_000 + time.tv_nsec) as u64
+}
+
+fn get_thread_name(pid: i32, tid: i32) -> String {
+    if let Ok(p) = Process::new(pid) {
+        if let Ok(tasks) = p.tasks() {
+            let t = tasks
+                .filter(|t| t.as_ref().unwrap().tid == tid)
+                .collect::<Vec<_>>();
+            t[0].as_ref().unwrap().stat().unwrap().comm
+        } else {
+            "unnamed".to_string()
+        }
+        // println!(
+        //     "{:?}: {:?}",
+        //     t.as_ref().unwrap().tid,
+        //     t.as_ref().unwrap().stat().unwrap().comm
+        // );
+    } else {
+        "unnamed".to_string()
+    }
 }
