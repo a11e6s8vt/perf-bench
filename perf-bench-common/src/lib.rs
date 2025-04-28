@@ -34,7 +34,7 @@ unsafe impl Send for Sample {}
 unsafe impl aya::Pod for Sample {}
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct ThreadId {
     pub tid: i32,
 }
@@ -46,7 +46,7 @@ unsafe impl Send for ThreadId {}
 unsafe impl aya::Pod for ThreadId {}
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct CommData {
     /// TGID
     pub pid: i32,
@@ -58,3 +58,17 @@ unsafe impl Send for CommData {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for CommData {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct SchedSwitchEvent {
+    pub tid: i32,
+    pub pid: i32,
+    pub comm: [u8; 16],
+}
+
+#[cfg(feature = "user")]
+unsafe impl Send for SchedSwitchEvent {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for SchedSwitchEvent {}

@@ -19,7 +19,7 @@ use aya_ebpf::macros::{kprobe, perf_event, tracepoint};
 use aya_ebpf::maps::{HashMap, PerfEventArray, StackTrace};
 use aya_ebpf::programs::{PerfEventContext, ProbeContext, TracePointContext};
 use aya_ebpf::{helpers::bpf_get_smp_processor_id, EbpfContext};
-use aya_log_ebpf::info;
+use aya_log_ebpf::{error, info};
 use bindings::{
     bpf_perf_event_data, pid_t, pt_regs, task_struct, thread_struct, trace_event_raw_sched_switch,
 };
@@ -27,7 +27,7 @@ use core::ffi::CStr;
 use core::ptr::null;
 
 use memoffset::offset_of;
-use perf_bench_common::{CommData, LogEvent, Sample, ThreadId};
+use perf_bench_common::{CommData, LogEvent, Sample, SchedSwitchEvent, ThreadId};
 
 #[derive(Clone)]
 struct ThreadTimingData {
@@ -50,6 +50,10 @@ static mut THREAD_COMM_MAP: HashMap<ThreadId, CommData> =
 
 #[map(name = "EVENTS")]
 static mut EVENTS: PerfEventArray<LogEvent> = PerfEventArray::<LogEvent>::new(0);
+
+#[map(name = "SCHED_SWITCH_EVENTS")]
+static mut SCHED_SWITCH_EVENTS: PerfEventArray<SchedSwitchEvent> =
+    PerfEventArray::<SchedSwitchEvent>::new(0);
 
 #[map(name = "SAMPLES")]
 static mut SAMPLES: PerfEventArray<Sample> = PerfEventArray::<Sample>::new(0);
@@ -195,6 +199,10 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
     // EVENTS.output(&ctx, &log_event, 0);
     // prev_pid: PID of the task being switched out (losing CPU).
     // next_pid: PID of the task being switched in (gaining CPU).
+    // let sched: *const SchedSwitch = ctx.as_ptr() as *const SchedSwitch;
+    // let event = unsafe { *sched };
+    //
+    // SCHED_SWITCH_EVENTS.output(&ctx, &event, 0);
     let prev_pid = bpf_probe_read(
         ctx.as_ptr()
             .offset(offset_of!(trace_event_raw_sched_switch, prev_pid) as isize)
@@ -220,18 +228,16 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
         )?;
         // Capture current tgid from current task
         let next_pid_tgid = bpf_get_current_pid_tgid();
-        let next_tgid = (next_pid_tgid >> 32) as i32;
+        let next_tgid = (next_pid_tgid >> 32) as u32;
 
-        let thread_id = ThreadId { tid: next_pid };
-        let comm_data = CommData {
-            pid: next_tgid,
+        let data = SchedSwitchEvent {
+            tid: next_pid,
+            pid: next_tgid as i32,
             comm: next_comm,
         };
+        SCHED_SWITCH_EVENTS.output(&ctx, &data, 0);
 
-        unsafe {
-            THREAD_COMM_MAP.insert(&thread_id, &comm_data, 0)?;
-        }
-        thread_goes_on(&ctx, next_pid, next_tgid, now, &next_comm);
+        thread_goes_on(&ctx, next_pid, next_tgid as i32, now, &next_comm);
     }
     // // let stack_id = match STACKS.get_stackid(&ctx, BPF_F_USER_STACK.into()) {
     // //     Ok(stack) => stack,
@@ -357,3 +363,7 @@ fn try_perf_bench(ctx: PerfEventContext) -> Result<u32, u32> {
 
     Ok(0)
 }
+
+#[link_section = "license"]
+#[no_mangle]
+static LICENSE: [u8; 13] = *b"Dual MIT/GPL\0";

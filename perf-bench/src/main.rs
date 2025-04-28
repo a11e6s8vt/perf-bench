@@ -49,7 +49,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use perf_bench_common::{CommData, LogEvent, Sample, ThreadId};
+use perf_bench_common::{CommData, LogEvent, Sample, SchedSwitchEvent, ThreadId};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct StackInfo {
@@ -160,15 +160,15 @@ async fn main() -> anyhow::Result<()> {
 
     let mut perf_array = AsyncPerfEventArray::try_from(ebpf_guard.take_map("SAMPLES").unwrap())?;
     let stacks_traces = StackTraceMap::try_from(ebpf_guard.take_map("STACK_TRACES").unwrap())?;
+    let mut switch_events_array =
+        AsyncPerfEventArray::try_from(ebpf_guard.take_map("SCHED_SWITCH_EVENTS").unwrap())?;
 
     let mut profiler = Profiler::new();
 
     let (tx_pids, mut rx_pids) = mpsc::channel(32);
     let (termination_signal_sender, rx) = watch::channel(false);
-    let (termination_signal_sender1, rx1) = watch::channel(false);
 
     let mut rx_proc_maps_termination = rx.clone();
-
     let get_proc_maps = task::spawn(async move {
         // let mut process_cache = ProcessCache::default();
         let mut proc_maps_by_pid = HashMap::new();
@@ -198,23 +198,47 @@ async fn main() -> anyhow::Result<()> {
         proc_maps_by_pid
     });
 
-    let mut rx_proc_maps_termination1 = rx.clone();
+    let mut sched_switch_join_handles = Vec::new();
 
-    let get_tid_comm_map = task::spawn(async move {
-        let mut tid_comm_map: HashMap<i32, (i32, String)> = HashMap::new();
-        loop {
-            tokio::select! {
-                _termination_message = rx_proc_maps_termination1.changed() => {
-                        // Terminated.
-                        break;
-                }
-                _ = read_thread_map(ebpf1.clone(), &mut tid_comm_map) => {
-                    println!("Hi");
+    for cpu in online_cpus().map_err(|(_, error)| error)? {
+        let mut buf = switch_events_array.open(cpu, Some(2))?;
+        let mut rx_proc_maps_termination1 = rx.clone();
+        let task: JoinHandle<Result<_, anyhow::Error>> = task::spawn(async move {
+            const SAMPLE_SIZE: usize = 60;
+            const BUFFER_COUNT: usize = 10;
+            let mut buffers = Vec::with_capacity(BUFFER_COUNT);
+            let mut current_buffer = BytesMut::with_capacity(SAMPLE_SIZE * BUFFER_COUNT);
+            for _ in 0..BUFFER_COUNT {
+                let rest = current_buffer.split_off(SAMPLE_SIZE);
+                buffers.push(current_buffer);
+                current_buffer = rest;
+            }
+            let mut tid_comm_map: HashMap<i32, String> = HashMap::new();
+            loop {
+                tokio::select! {
+                    _termination_message = rx_proc_maps_termination1.changed() => {
+                            // Terminated.
+                            break;
+                    }
+                    events = buf.read_events(&mut buffers) => {
+                        let events = events?;
+                        for buf in buffers.iter_mut().take(events.read) {
+                            let data = unsafe { (buf.as_ptr() as *const SchedSwitchEvent).read_unaligned() };
+                            let comm = String::from_utf8_lossy(&data.comm).to_string();
+                            // let comm = if let Ok(comm) = CStr::from_bytes_until_nul(&data.comm) {
+                            //     comm.to_string_lossy().to_string()
+                            // } else {
+                            //     "unnamed".to_string()
+                            // };
+                            tid_comm_map.entry(data.tid).or_insert(comm);
+                        }
+                    }
                 }
             }
-        }
-        tid_comm_map
-    });
+            Ok(tid_comm_map)
+        });
+        sched_switch_join_handles.push(task);
+    }
 
     let mut join_handles = Vec::new();
 
@@ -336,8 +360,12 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("bpf is dropped");
     termination_signal_sender.send(true)?;
     eprintln!("termination signal has been sent");
-    let (proc_maps_by_pid, tid_comm_map, results) =
-        join!(get_proc_maps, get_tid_comm_map, join_all(join_handles));
+    let (proc_maps_by_pid, tid_comm_map, results) = join!(
+        get_proc_maps,
+        join_all(sched_switch_join_handles),
+        join_all(join_handles)
+    );
+    // let (proc_maps_by_pid, results) = join!(get_proc_maps, join_all(join_handles));
     let thread_vecs: Vec<Vec<_>> = results
         .into_iter()
         .filter_map(Result::ok)
@@ -347,8 +375,17 @@ async fn main() -> anyhow::Result<()> {
     // `thread_vecs` contains entries corresponding to each cpu. Merging it
     // into one.
     let threads = merge_threads(thread_vecs);
-    eprintln!("threads: {:?}", tid_comm_map?);
+    println!("{:?}", tid_comm_map);
 
+    // let sched_events_vec: Vec<Vec<_>> = tid_comm_map
+    //     .into_iter()
+    //     .filter_map(Result::ok)
+    //     .filter_map(Result::ok)
+    //     .map(|map| map.into_values().collect())
+    //     .collect();
+
+    // println!("{:?}", sched_events_vec);
+    // let tid_comm_map = merge_sched_events(sched_events_vec);
     // use std::fs::File;
     // use std::io::{BufWriter, Write};
     // let file = File::create("threads.json")?;
@@ -386,7 +423,9 @@ async fn read_thread_map(
         };
 
         eprintln!("comm: {:?}", comm.clone());
-        thread_map.insert(thread_id.tid, (comm_data.pid, comm));
+        thread_map
+            .entry(thread_id.tid)
+            .or_insert((comm_data.pid, comm));
     }
 
     Ok(())
@@ -440,6 +479,27 @@ fn merge_thread_into(mut thread: Thread, merged_thread: &mut Thread) {
     }
     merged_thread.samples.append(&mut thread.samples);
 }
+
+// fn merge_sched_events(sched_events: Vec<Vec<Thread>>) -> HashMap<i32, (i32, String)> {
+//     let mut tid_comm_map = HashMap::new();
+//     for events_vec in sched_events {
+//         for event in events_vec {
+//             match tid_comm_map.get_mut(&event.) {
+//                 Some(merged_thread) => merge_thread_into(thread, merged_thread),
+//                 None => {
+//                     thread_map.insert(thread.tid, thread);
+//                 }
+//             }
+//         }
+//     }
+//     thread_map
+//         .into_values()
+//         .map(|mut thread| {
+//             thread.samples.sort_by_key(|s| s.timestamp);
+//             thread
+//         })
+//         .collect()
+// }
 
 fn save_to_profile(
     start_time: Instant,

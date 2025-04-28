@@ -48,7 +48,6 @@ impl ProcessInfo {
                 );
             })
             .ok();
-        println!("{:?}", exe_link);
 
         Self {
             process,
