@@ -63,8 +63,10 @@ unsafe impl aya::Pod for CommData {}
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct SchedSwitchEvent {
     pub tid: i32,
+    // pid = tgid
     pub pid: i32,
     pub comm: [u8; 16],
+    pub is_kernel_process: bool,
 }
 
 #[cfg(feature = "user")]
@@ -72,3 +74,17 @@ unsafe impl Send for SchedSwitchEvent {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for SchedSwitchEvent {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct TaskInfo {
+    pub parent_pid: i32,
+    pub child_pid: i32,
+    pub child_comm: [u8; 16],
+}
+
+#[cfg(feature = "user")]
+unsafe impl Send for TaskInfo {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for TaskInfo {}

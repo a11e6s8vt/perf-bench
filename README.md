@@ -22,7 +22,7 @@ cargo install --git https://github.com/aya-rs/aya -- aya-tool
 
 ```shell
 sudo apt install linux-image-$(uname -r)-dbgsym
-
+aya-tool generate trace_event_raw_sched_process_fork > perf-bench-ebpf/src/sched_process_fork.rs
 aya-tool generate bpf_perf_event_data trace_event_raw_sched_switch task_struct > perf-bench-ebpf/src/bindings.rs
 ```
 

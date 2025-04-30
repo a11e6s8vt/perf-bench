@@ -1,0 +1,5 @@
+# [build]
+# rustflags = ["-Z", "unstable-options", "-C", "link-arg=-nostartfiles"]
+
+# [unstable]
+# build-std = ["core"]

@@ -6,28 +6,33 @@
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
 mod bindings;
+mod sched_process_fork;
+include!(concat!(env!("OUT_DIR"), "/vmlinux.rs"));
 
-use aya_ebpf::bindings::BPF_F_USER_STACK;
-use aya_ebpf::bpf_printk;
-use aya_ebpf::cty::c_char;
-use aya_ebpf::helpers::{
-    bpf_get_current_comm, bpf_get_current_task_btf, bpf_ktime_get_ns, bpf_probe_read,
+use core::{ffi::CStr, ptr::null};
+
+use aya_ebpf::{
+    bindings::BPF_F_USER_STACK,
+    bpf_printk,
+    cty::{c_char, c_schar},
+    helpers::{
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task_btf,
+        bpf_get_smp_processor_id, bpf_ktime_get_ns, bpf_probe_read, bpf_probe_read_kernel,
+        bpf_probe_read_kernel_str_bytes, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
+    },
+    macros::{kprobe, map, perf_event, raw_tracepoint, tracepoint},
+    maps::{HashMap, PerfEventArray, StackTrace},
+    programs::{PerfEventContext, ProbeContext, RawTracePointContext, TracePointContext},
+    EbpfContext,
 };
-use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel};
-use aya_ebpf::macros::map;
-use aya_ebpf::macros::{kprobe, perf_event, tracepoint};
-use aya_ebpf::maps::{HashMap, PerfEventArray, StackTrace};
-use aya_ebpf::programs::{PerfEventContext, ProbeContext, TracePointContext};
-use aya_ebpf::{helpers::bpf_get_smp_processor_id, EbpfContext};
-use aya_log_ebpf::{error, info};
+use aya_log_ebpf::{debug, error, info};
 use bindings::{
-    bpf_perf_event_data, pid_t, pt_regs, task_struct, thread_struct, trace_event_raw_sched_switch,
+    bpf_perf_event_data, mm_struct, pid_t, pt_regs, task_struct, thread_struct,
+    trace_event_raw_sched_switch,
 };
-use core::ffi::CStr;
-use core::ptr::null;
-
 use memoffset::offset_of;
-use perf_bench_common::{CommData, LogEvent, Sample, SchedSwitchEvent, ThreadId};
+use perf_bench_common::{CommData, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
+use sched_process_fork::trace_event_raw_sched_process_fork;
 
 #[derive(Clone)]
 struct ThreadTimingData {
@@ -44,12 +49,10 @@ struct ThreadTimingData {
     /// set to the kernel user stack when going off
     kernel_stack_when_going_off: i64,
 }
-#[map(name = "THREAD_COMM_MAP")]
-static mut THREAD_COMM_MAP: HashMap<ThreadId, CommData> =
-    HashMap::<ThreadId, CommData>::with_max_entries(102400, 0);
 
-#[map(name = "EVENTS")]
-static mut EVENTS: PerfEventArray<LogEvent> = PerfEventArray::<LogEvent>::new(0);
+#[map(name = "TASK_INFO_MAP")]
+static mut TASK_INFO_MAP: HashMap<i32, TaskInfo> =
+    HashMap::<i32, TaskInfo>::with_max_entries(102400, 0);
 
 #[map(name = "SCHED_SWITCH_EVENTS")]
 static mut SCHED_SWITCH_EVENTS: PerfEventArray<SchedSwitchEvent> =
@@ -65,6 +68,10 @@ static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(102400, 0);
 static mut THREAD_TIMING: HashMap<i32, ThreadTimingData> = HashMap::with_max_entries(1024, 0);
 
 static SAMPLE_PERIOD_NS: u64 = 99999;
+const PARENT_COMM_OFFSET: usize = 8;
+const PARENT_PID_OFFSET: usize = 24;
+const CHILD_COMM_OFFSET: usize = 28;
+const CHILD_PID_OFFSET: usize = 44;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -181,6 +188,60 @@ fn thread_gets_sampled_while_on(
 }
 
 #[tracepoint]
+pub fn handle_fork(ctx: TracePointContext) -> u32 {
+    match unsafe { try_handle_fork(&ctx) } {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[inline(always)]
+pub unsafe fn try_handle_fork(ctx: &TracePointContext) -> Result<(), i64> {
+    info!(ctx, "hello from eBPF!");
+    let parent_pid = bpf_probe_read(
+        ctx.as_ptr()
+            .offset(offset_of!(trace_event_raw_sched_process_fork, parent_pid) as isize)
+            as *const pid_t,
+    )?;
+    let parent_comm_offset = core::mem::offset_of!(trace_event_raw_sched_process_fork, parent_comm);
+    let parent_comm = unsafe {
+        bpf_probe_read(ctx.as_ptr().offset(parent_comm_offset as isize)
+            as *const [::aya_ebpf::cty::c_uchar; 16usize])?
+    };
+    // let parent_comm = core::str::from_utf8_unchecked(&parent_comm);
+
+    let child_pid = bpf_probe_read(
+        ctx.as_ptr()
+            .offset(offset_of!(trace_event_raw_sched_process_fork, child_pid) as isize)
+            as *const pid_t,
+    )?;
+    let child_comm_offset = core::mem::offset_of!(trace_event_raw_sched_process_fork, child_comm);
+    let child_comm = unsafe {
+        bpf_probe_read(ctx.as_ptr().offset(child_comm_offset as isize)
+            as *const [::aya_ebpf::cty::c_uchar; 16usize])?
+    };
+    // let child_comm = core::str::from_utf8_unchecked(&child_comm);
+    // debug!(
+    //     ctx,
+    //     "pid: {} {} {} {}",
+    //     parent_pid,
+    //     core::str::from_utf8_unchecked(&parent_comm),
+    //     child_pid,
+    //     core::str::from_utf8_unchecked(&child_comm)
+    // );
+
+    let info = TaskInfo {
+        parent_pid,
+        child_pid,
+        child_comm,
+    };
+    // // bpf_printk!(b"---------------- command: %s", child_comm.as_ptr());
+    //
+    TASK_INFO_MAP.insert(&child_pid, &info, 0)?;
+    Ok(())
+}
+
+#[tracepoint]
 pub fn sched_switch(ctx: TracePointContext) -> u32 {
     match unsafe { try_sched_switch(ctx) } {
         Ok(ret) => ret,
@@ -221,20 +282,33 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
     }
 
     if next_pid != 0 {
-        let next_comm = bpf_probe_read(
-            ctx.as_ptr()
-                .offset(offset_of!(trace_event_raw_sched_switch, next_comm) as isize)
-                as *const [u8; 16usize],
-        )?;
+        let next_comm_offset = core::mem::offset_of!(trace_event_raw_sched_switch, next_comm);
+        let next_comm = unsafe {
+            bpf_probe_read(ctx.as_ptr().offset(next_comm_offset as isize)
+                as *const [::aya_ebpf::cty::c_uchar; 16usize])?
+        };
         // Capture current tgid from current task
-        let next_pid_tgid = bpf_get_current_pid_tgid();
-        let next_tgid = (next_pid_tgid >> 32) as u32;
+        // let next_pid_tgid = bpf_get_current_pid_tgid();
+        // let next_tgid = (next_pid_tgid >> 32) as u32;
+        let next_tgid = if let Some(info) = unsafe { TASK_INFO_MAP.get(&next_pid) } {
+            if next_comm.eq(&info.child_comm) {
+                info.parent_pid
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let task = aya_ebpf::helpers::bpf_get_current_task() as *mut task_struct;
+        let mm = bpf_probe_read_kernel(access::task_struct_mm(task))?;
 
         let data = SchedSwitchEvent {
             tid: next_pid,
             pid: next_tgid as i32,
             comm: next_comm,
+            is_kernel_process: mm.is_null(),
         };
+
         SCHED_SWITCH_EVENTS.output(&ctx, &data, 0);
 
         thread_goes_on(&ctx, next_pid, next_tgid as i32, now, &next_comm);

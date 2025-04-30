@@ -11,7 +11,10 @@ aya-log-ebpf = { workspace = true }
 memoffset = { workspace = true }
 
 [build-dependencies]
+cc = "1.2.20"
+bindgen = "0.71.1"
 which = { workspace = true }
+aya-tool = { git = "https://github.com/aya-rs/aya" }
 
 [[bin]]
 name = "perf-bench"

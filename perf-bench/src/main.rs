@@ -11,10 +11,13 @@ use aya::{
         perf::{AsyncPerfEventArray, PerfBufferError},
         HashMap as AyaMap, MapData, StackTraceMap,
     },
-    programs::{perf_event, KProbe, PerfEvent, PerfEventScope, SamplePolicy, TracePoint},
+    programs::{
+        perf_event, KProbe, PerfEvent, PerfEventScope, RawTracePoint, SamplePolicy, TracePoint,
+    },
     util::online_cpus,
     Ebpf,
 };
+use aya_log::EbpfLogger;
 use bytes::BytesMut;
 use cache::ProcessCache;
 use futures::{future::join_all, join};
@@ -49,7 +52,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use perf_bench_common::{CommData, LogEvent, Sample, SchedSwitchEvent, ThreadId};
+use perf_bench_common::{CommData, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct StackInfo {
@@ -104,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut ebpf1 = ebpf.clone();
     let mut ebpf_guard = ebpf.lock().await;
+
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf_guard) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
@@ -111,6 +115,15 @@ async fn main() -> anyhow::Result<()> {
 
     let start_time = Instant::now();
     let start_timestamp_ns = get_timestamp_ns();
+
+    // Load and attach the tracepoint for sched_process_fork
+    let tp: &mut TracePoint = ebpf_guard
+        .program_mut("handle_fork")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    tp.load()?;
+    tp.attach("sched", "sched_process_fork")?;
 
     // Load and attach the tracepoint for context switches
     let tp: &mut TracePoint = ebpf_guard
@@ -213,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
                 buffers.push(current_buffer);
                 current_buffer = rest;
             }
-            let mut tid_comm_map: HashMap<i32, String> = HashMap::new();
+            let mut tid_comm_map: HashMap<i32, (i32, String, bool)> = HashMap::new();
             loop {
                 tokio::select! {
                     _termination_message = rx_proc_maps_termination1.changed() => {
@@ -230,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
                             // } else {
                             //     "unnamed".to_string()
                             // };
-                            tid_comm_map.entry(data.tid).or_insert(comm);
+                            tid_comm_map.entry(data.tid).or_insert((data.pid, comm, data.is_kernel_process));
                         }
                     }
                 }
@@ -392,14 +405,14 @@ async fn main() -> anyhow::Result<()> {
     // let mut writer = BufWriter::new(file);
     // serde_json::to_writer(&mut writer, &threads)?;
     // writer.flush()?;
-    save_to_profile(
-        start_time,
-        start_timestamp_ns,
-        threads,
-        &stacks_traces,
-        proc_maps_by_pid?,
-        &mut profiler,
-    );
+    // save_to_profile(
+    //     start_time,
+    //     start_timestamp_ns,
+    //     threads,
+    //     &stacks_traces,
+    //     proc_maps_by_pid?,
+    //     &mut profiler,
+    // );
     Ok(())
 }
 
