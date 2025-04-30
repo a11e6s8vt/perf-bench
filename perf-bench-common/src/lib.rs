@@ -66,7 +66,6 @@ pub struct SchedSwitchEvent {
     // pid = tgid
     pub pid: i32,
     pub comm: [u8; 16],
-    pub is_kernel_process: bool,
 }
 
 #[cfg(feature = "user")]

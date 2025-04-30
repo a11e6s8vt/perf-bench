@@ -7,8 +7,6 @@
 #[allow(non_snake_case)]
 mod bindings;
 mod sched_process_fork;
-include!(concat!(env!("OUT_DIR"), "/vmlinux.rs"));
-
 use core::{ffi::CStr, ptr::null};
 
 use aya_ebpf::{
@@ -20,9 +18,9 @@ use aya_ebpf::{
         bpf_get_smp_processor_id, bpf_ktime_get_ns, bpf_probe_read, bpf_probe_read_kernel,
         bpf_probe_read_kernel_str_bytes, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
     },
-    macros::{kprobe, map, perf_event, raw_tracepoint, tracepoint},
+    macros::{fentry, kprobe, map, perf_event, tracepoint},
     maps::{HashMap, PerfEventArray, StackTrace},
-    programs::{PerfEventContext, ProbeContext, RawTracePointContext, TracePointContext},
+    programs::{FEntryContext, PerfEventContext, ProbeContext, TracePointContext},
     EbpfContext,
 };
 use aya_log_ebpf::{debug, error, info};
@@ -299,14 +297,31 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
         } else {
             0
         };
-        let task = aya_ebpf::helpers::bpf_get_current_task() as *mut task_struct;
-        let mm = bpf_probe_read_kernel(access::task_struct_mm(task))?;
+        // let task = aya_ebpf::helpers::bpf_get_current_task() as *const task_struct;
+        // let mm = match bpf_probe_read_kernel(&(*task).mm) {
+        //     Ok(mm) => mm,
+        //     Err(_) => return Ok(0),
+        // };
+        // // Check if mm exists (kernel threads won't have one)
+        // if mm.is_null() {
+        //     info!(
+        //         &ctx,
+        //         "KERNEL THREAD --> comm: {}",
+        //         core::str::from_utf8_unchecked(&next_comm)
+        //     );
+        // }
 
+        // debug!(
+        //     &ctx,
+        //     "pid: {} {} {}",
+        //     next_pid,
+        //     next_tgid,
+        //     core::str::from_utf8_unchecked(&next_comm)
+        // );
         let data = SchedSwitchEvent {
             tid: next_pid,
             pid: next_tgid as i32,
             comm: next_comm,
-            is_kernel_process: mm.is_null(),
         };
 
         SCHED_SWITCH_EVENTS.output(&ctx, &data, 0);
@@ -391,26 +406,24 @@ pub fn finish_task_switch(ctx: ProbeContext) -> u32 {
 
 #[inline(always)]
 pub unsafe fn try_finish_task_switch(ctx: ProbeContext) -> Result<u32, i64> {
-    // let regs = ctx.as_ptr() as *const pt_regs;
-    // let prev_task = bpf_probe_read(&(*regs).ax as *const u64 as *const *const task_struct)?;
-    // let prev_pid =
-    //     bpf_probe_read(prev_task.offset(0).offset(offset_of!(task_struct, pid) as isize) as *const pid_t)?;
-    // let regs = bpf_probe_read(ctx.as_ptr() as *const *const pt_regs)?;
-    // let ip = if regs == null() { 0 } else { bpf_probe_read(&(*regs).ip)? };
-    // let next_pid = ctx.pid() as i32;
-    // let timestamp = bpf_ktime_get_ns();
-    // // let stack_id = match STACKS.get_stackid(&ctx, BPF_F_USER_STACK.into()) {
-    // //     Ok(stack) => stack,
-    // //     Err(e) => e,
-    // // };
-    // // let task: *const task_struct = bpf_get_current_task_btf() as *const task_struct;
-    // // let current_pid = bpf_probe_read(task as *const u64)?;
-    // let switch_entry = LogEvent {
-    //     timestamp,
-    //     prev_pid,
-    //     next_pid,
-    // };
-    // EVENTS.output(&ctx, &switch_entry, 0);
+    // Get arguments as raw pointers
+    let task: *const task_struct = ctx.arg(0).ok_or(1)?;
+
+    // Read values from task_struct
+    let comm = bpf_probe_read_kernel(&(*task).comm as *const [::aya_ebpf::cty::c_char; 16usize])?;
+    let comm = core::mem::transmute::<[i8; 16], [u8; 16]>(comm);
+    let comm = core::str::from_utf8_unchecked(&comm);
+    let tgid = bpf_probe_read_kernel(&(*task).tgid as *const pid_t)?;
+    let tid = bpf_probe_read_kernel(&(*task).pid as *const pid_t)?;
+
+    let mm = bpf_probe_read_kernel(&(*task).mm as &*mut mm_struct)?;
+    let kernel_threads = if mm.is_null() { 1 } else { 0 };
+
+    info!(
+        &ctx,
+        "wake_up_new_task. comm: {}, tgid: {}, tid: {} {}.", comm, tgid, tid, kernel_threads
+    );
+
     Ok(0)
 }
 

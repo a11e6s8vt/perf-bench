@@ -12,7 +12,8 @@ use aya::{
         HashMap as AyaMap, MapData, StackTraceMap,
     },
     programs::{
-        perf_event, KProbe, PerfEvent, PerfEventScope, RawTracePoint, SamplePolicy, TracePoint,
+        perf_event, FEntry, KProbe, PerfEvent, PerfEventScope, RawTracePoint, SamplePolicy,
+        TracePoint,
     },
     util::online_cpus,
     Ebpf,
@@ -226,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
                 buffers.push(current_buffer);
                 current_buffer = rest;
             }
-            let mut tid_comm_map: HashMap<i32, (i32, String, bool)> = HashMap::new();
+            let mut tid_comm_map: HashMap<i32, (i32, String)> = HashMap::new();
             loop {
                 tokio::select! {
                     _termination_message = rx_proc_maps_termination1.changed() => {
@@ -237,13 +238,13 @@ async fn main() -> anyhow::Result<()> {
                         let events = events?;
                         for buf in buffers.iter_mut().take(events.read) {
                             let data = unsafe { (buf.as_ptr() as *const SchedSwitchEvent).read_unaligned() };
-                            let comm = String::from_utf8_lossy(&data.comm).to_string();
-                            // let comm = if let Ok(comm) = CStr::from_bytes_until_nul(&data.comm) {
-                            //     comm.to_string_lossy().to_string()
-                            // } else {
-                            //     "unnamed".to_string()
-                            // };
-                            tid_comm_map.entry(data.tid).or_insert((data.pid, comm, data.is_kernel_process));
+                            // let comm = String::from_utf8_lossy(&data.comm).trim().to_string();
+                            let comm = if let Ok(comm) = CStr::from_bytes_until_nul(&data.comm) {
+                                comm.to_string_lossy().to_string()
+                            } else {
+                                "unnamed".to_string()
+                            };
+                            tid_comm_map.entry(data.tid).or_insert((data.pid, comm));
                         }
                     }
                 }
@@ -388,16 +389,16 @@ async fn main() -> anyhow::Result<()> {
     // `thread_vecs` contains entries corresponding to each cpu. Merging it
     // into one.
     let threads = merge_threads(thread_vecs);
-    println!("{:?}", tid_comm_map);
 
-    // let sched_events_vec: Vec<Vec<_>> = tid_comm_map
-    //     .into_iter()
-    //     .filter_map(Result::ok)
-    //     .filter_map(Result::ok)
-    //     .map(|map| map.into_values().collect())
-    //     .collect();
+    let sched_events = tid_comm_map
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
 
-    // println!("{:?}", sched_events_vec);
+    for events in sched_events {
+        println!("{:?}", events);
+    }
     // let tid_comm_map = merge_sched_events(sched_events_vec);
     // use std::fs::File;
     // use std::io::{BufWriter, Write};
