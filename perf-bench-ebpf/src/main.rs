@@ -167,6 +167,7 @@ fn thread_gets_sampled_while_on(
         Ok(stack) => stack,
         Err(e) => e,
     };
+
     let sample = Sample {
         cpu,
         timestamp: now,
@@ -179,6 +180,22 @@ fn thread_gets_sampled_while_on(
         kernel_stack_id,
         thread_name: comm.clone(),
     };
+
+    let is_kernel_thread = if let Some(info) = unsafe { TASK_INFO_MAP.get(&pid) } {
+        let is_kernel_thread = if unsafe { core::str::from_utf8_unchecked(&comm) }
+            == unsafe { core::str::from_utf8_unchecked(&info.comm) }
+        {
+            info.is_kernel_thread as u8
+        } else {
+            0
+        };
+        is_kernel_thread
+    } else {
+        0
+    };
+
+    let comm = unsafe { core::str::from_utf8_unchecked(&comm) };
+    debug!(ctx, "tgid: {} {} {} {}", tgid, pid, comm, is_kernel_thread);
     unsafe { SAMPLES.output(ctx, &sample, 0) };
     timing.cpu_delta_since_last_sample_ns = 0;
     timing.last_seen_ts = now;
@@ -218,24 +235,9 @@ pub unsafe fn try_handle_fork(ctx: &TracePointContext) -> Result<(), i64> {
         bpf_probe_read(ctx.as_ptr().offset(child_comm_offset as isize)
             as *const [::aya_ebpf::cty::c_uchar; 16usize])?
     };
-    // let child_comm = core::str::from_utf8_unchecked(&child_comm);
-    // debug!(
-    //     ctx,
-    //     "pid: {} {} {} {}",
-    //     parent_pid,
-    //     core::str::from_utf8_unchecked(&parent_comm),
-    //     child_pid,
-    //     core::str::from_utf8_unchecked(&child_comm)
-    // );
 
-    let info = TaskInfo {
-        parent_pid,
-        child_pid,
-        child_comm,
-    };
     // // bpf_printk!(b"---------------- command: %s", child_comm.as_ptr());
     //
-    TASK_INFO_MAP.insert(&child_pid, &info, 0)?;
     Ok(())
 }
 
@@ -249,19 +251,6 @@ pub fn sched_switch(ctx: TracePointContext) -> u32 {
 
 #[inline(always)]
 pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
-    // let regs: *const pt_regs = bpf_probe_read(ctx.as_ptr() as *const _)?;
-    // let ax: u64 = bpf_probe_read(regs.offset(offset_of!(pt_regs, ax) as isize) as *const _)?;
-    // let log_event = LogEvent {
-    //     tag: 1,
-    //     field: ax,
-    // };
-    // EVENTS.output(&ctx, &log_event, 0);
-    // prev_pid: PID of the task being switched out (losing CPU).
-    // next_pid: PID of the task being switched in (gaining CPU).
-    // let sched: *const SchedSwitch = ctx.as_ptr() as *const SchedSwitch;
-    // let event = unsafe { *sched };
-    //
-    // SCHED_SWITCH_EVENTS.output(&ctx, &event, 0);
     let prev_pid = bpf_probe_read(
         ctx.as_ptr()
             .offset(offset_of!(trace_event_raw_sched_switch, prev_pid) as isize)
@@ -276,6 +265,32 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
 
     if prev_pid != 0 {
         let prev_tgid = 0; // TODO
+        let prev_comm_offset = core::mem::offset_of!(trace_event_raw_sched_switch, prev_comm);
+        let prev_comm = unsafe {
+            bpf_probe_read(ctx.as_ptr().offset(prev_comm_offset as isize)
+                as *const [::aya_ebpf::cty::c_uchar; 16usize])?
+        };
+
+        let prev_tgid = if let Some(info) = unsafe { TASK_INFO_MAP.get(&prev_pid) } {
+            let tgid = if core::str::from_utf8_unchecked(&prev_comm)
+                == core::str::from_utf8_unchecked(&info.comm)
+            {
+                info.pid
+            } else {
+                0
+            };
+            tgid
+        } else {
+            0
+        };
+
+        // debug!(
+        //     &ctx,
+        //     "prev_tgid: {} {} {}",
+        //     prev_tgid,
+        //     prev_pid,
+        //     core::str::from_utf8_unchecked(&prev_comm)
+        // );
         thread_goes_off(&ctx, prev_pid, prev_tgid, now);
     }
 
@@ -285,37 +300,25 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
             bpf_probe_read(ctx.as_ptr().offset(next_comm_offset as isize)
                 as *const [::aya_ebpf::cty::c_uchar; 16usize])?
         };
-        // Capture current tgid from current task
-        // let next_pid_tgid = bpf_get_current_pid_tgid();
-        // let next_tgid = (next_pid_tgid >> 32) as u32;
+
         let next_tgid = if let Some(info) = unsafe { TASK_INFO_MAP.get(&next_pid) } {
-            if next_comm.eq(&info.child_comm) {
-                info.parent_pid
+            let tgid = if core::str::from_utf8_unchecked(&next_comm)
+                == core::str::from_utf8_unchecked(&info.comm)
+            {
+                info.pid
             } else {
                 0
-            }
+            };
+            tgid
         } else {
             0
         };
-        // let task = aya_ebpf::helpers::bpf_get_current_task() as *const task_struct;
-        // let mm = match bpf_probe_read_kernel(&(*task).mm) {
-        //     Ok(mm) => mm,
-        //     Err(_) => return Ok(0),
-        // };
-        // // Check if mm exists (kernel threads won't have one)
-        // if mm.is_null() {
-        //     info!(
-        //         &ctx,
-        //         "KERNEL THREAD --> comm: {}",
-        //         core::str::from_utf8_unchecked(&next_comm)
-        //     );
-        // }
 
         // debug!(
         //     &ctx,
-        //     "pid: {} {} {}",
-        //     next_pid,
+        //     "next_tgid: {} {} {}",
         //     next_tgid,
+        //     next_pid,
         //     core::str::from_utf8_unchecked(&next_comm)
         // );
         let data = SchedSwitchEvent {
@@ -328,18 +331,6 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
 
         thread_goes_on(&ctx, next_pid, next_tgid as i32, now, &next_comm);
     }
-    // // let stack_id = match STACKS.get_stackid(&ctx, BPF_F_USER_STACK.into()) {
-    // //     Ok(stack) => stack,
-    // //     Err(e) => e,
-    // // };
-    // // let task: *const task_struct = bpf_get_current_task_btf() as *const task_struct;
-    // // let current_pid = bpf_probe_read(task as *const u64)?;
-    // let switch_entry = LogEvent {
-    //     timestamp,
-    //     prev_pid,
-    //     next_pid,
-    // };
-    // EVENTS.output(&ctx, &switch_entry, 0);
     Ok(0)
 }
 
@@ -362,10 +353,10 @@ pub fn cpu_clock(ctx: PerfEventContext) -> Result<u32, i64> {
     }
 
     // The thread ID (TID). Unique for each thread.
-    let pid = unsafe { bpf_probe_read_kernel(&(*task).pid)? };
+    // let pid = unsafe { bpf_probe_read_kernel(&(*task).pid)? };
 
     // The process ID (PID). Same for all threads of the same process.
-    let tgid = unsafe { bpf_probe_read_kernel(&(*task).tgid)? };
+    // let tgid = unsafe { bpf_probe_read_kernel(&(*task).tgid)? };
 
     // Get the comm (process name).
     let comm = match bpf_get_current_comm() {
@@ -375,24 +366,6 @@ pub fn cpu_clock(ctx: PerfEventContext) -> Result<u32, i64> {
 
     thread_gets_sampled_while_on(&ctx, cpu, ctx.pid() as i32, ctx.tgid() as i32, now, comm);
 
-    // let stack_id = match unsafe {
-    //     bpf_probe_read(ctx.as_ptr().offset(offset_of!(pt_regs, ip) as isize) as *const u64)
-    // } {
-    //     Ok(val) => val as i64,
-    //     Err(e) => e,
-    // };
-    // // let stack_id = match unsafe { STACKS.get_stackid(&ctx, BPF_F_USER_STACK.into()) } {
-    // //     Ok(stack) => stack,
-    // //     Err(e) => e
-    // // };
-    // let timestamp = unsafe { bpf_ktime_get_ns() };
-    // let switch_entry = LogEvent {
-    //     prev_pid: 13,
-    //     next_pid: 5,
-    //     timestamp,
-    //     stack_id,
-    // };
-    // unsafe { EVENTS.output(&ctx, &switch_entry, 0) };
     Ok(0)
 }
 
@@ -412,41 +385,27 @@ pub unsafe fn try_finish_task_switch(ctx: ProbeContext) -> Result<u32, i64> {
     // Read values from task_struct
     let comm = bpf_probe_read_kernel(&(*task).comm as *const [::aya_ebpf::cty::c_char; 16usize])?;
     let comm = core::mem::transmute::<[i8; 16], [u8; 16]>(comm);
-    let comm = core::str::from_utf8_unchecked(&comm);
     let tgid = bpf_probe_read_kernel(&(*task).tgid as *const pid_t)?;
     let tid = bpf_probe_read_kernel(&(*task).pid as *const pid_t)?;
 
     let mm = bpf_probe_read_kernel(&(*task).mm as &*mut mm_struct)?;
-    let kernel_threads = if mm.is_null() { 1 } else { 0 };
+    let is_kernel_thread = if mm.is_null() { true } else { false };
 
-    info!(
-        &ctx,
-        "wake_up_new_task. comm: {}, tgid: {}, tid: {} {}.", comm, tgid, tid, kernel_threads
-    );
-
-    Ok(0)
-}
-
-#[perf_event]
-pub fn perf_bench(ctx: PerfEventContext) -> u32 {
-    match try_perf_bench(ctx) {
-        Ok(ret) => ret,
-        Err(ret) => ret,
-    }
-}
-
-fn try_perf_bench(ctx: PerfEventContext) -> Result<u32, u32> {
-    let cpu = unsafe { bpf_get_smp_processor_id() };
-    match ctx.pid() {
-        0 => info!(
-            &ctx,
-            "perf_event 'perftest' triggered on CPU {}, running a kernel task", cpu
-        ),
-        pid => info!(
-            &ctx,
-            "perf_event 'perftest' triggered on CPU {}, running PID {}", cpu, pid
-        ),
-    }
+    let info = TaskInfo {
+        pid: tgid,
+        tid,
+        comm,
+        is_kernel_thread,
+    };
+    // // bpf_printk!(b"---------------- command: %s", child_comm.as_ptr());
+    //
+    TASK_INFO_MAP.insert(&tid, &info, 0)?;
+    // let kt = if is_kernel_thread { 1 } else { 0 };
+    // let comm = core::str::from_utf8_unchecked(&comm);
+    // info!(
+    //     &ctx,
+    //     "wake_up_new_task. comm: {}, tgid: {}, tid: {} {}.", comm, tgid, tid, kt
+    // );
 
     Ok(0)
 }

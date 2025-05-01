@@ -25,6 +25,7 @@ pub struct Sample {
     pub kernel_stack_id: i64,
     pub user_stack_id: i64,
     pub thread_name: [u8; 16],
+    // pub is_kernel_thread: bool,
 }
 
 #[cfg(feature = "user")]
@@ -77,9 +78,11 @@ unsafe impl aya::Pod for SchedSwitchEvent {}
 #[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct TaskInfo {
-    pub parent_pid: i32,
-    pub child_pid: i32,
-    pub child_comm: [u8; 16],
+    // pid = tgid
+    pub pid: i32,
+    pub tid: i32,
+    pub comm: [u8; 16],
+    pub is_kernel_thread: bool,
 }
 
 #[cfg(feature = "user")]
