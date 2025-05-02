@@ -25,7 +25,7 @@ pub struct Sample {
     pub kernel_stack_id: i64,
     pub user_stack_id: i64,
     pub thread_name: [u8; 16],
-    // pub is_kernel_thread: bool,
+    pub is_kernel_thread: bool,
 }
 
 #[cfg(feature = "user")]

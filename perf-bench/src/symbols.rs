@@ -1,10 +1,17 @@
+use std::rc::Rc;
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{read_link, File},
     path::{Path, PathBuf},
 };
 
+use addr2line::Context;
+use gimli::{EndianRcSlice, RunTimeEndian};
+use memmap2::Mmap;
+use object::{Object, ObjectSection};
+
 use addr2line::{demangle, gimli, Loader};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::StackInfo;
 use aya::{maps::stack_trace::StackTrace, util::kernel_symbols};
@@ -95,11 +102,13 @@ impl SymbolFinder {
                 let mut info = StackFrameInfo::prepare(meta);
                 if let Some(sym) = self.ksyms.range(..=frame.ip).next_back().map(|(_, s)| s) {
                     info.symbol = Some(format!("{sym}_[k]"));
+                    info.source = Some("/proc/kallsyms".to_string());
+                    info.object_path = Some(PathBuf::from("/proc/kallsyms"));
+                    info.address = frame.ip;
                     // println!("{:#x} {}", frame.ip, sym);
                 } else {
                     // println!("{:#x}", frame.ip);
                 }
-
                 info
             })
             .collect::<Vec<_>>();
@@ -115,32 +124,37 @@ impl SymbolFinder {
         let user_stack = trace
             .frames()
             .iter()
-            .map(|frame| {
-                let address = frame.ip;
+            .filter_map(|frame| {
+                if Self::is_a_valid_addr(frame.ip) {
+                    let address = frame.ip;
 
-                if let Some(info) = self.addr_cache.get(meta.tid as _, address) {
-                    return info;
+                    if let Some(info) = self.addr_cache.get(meta.tid as _, address) {
+                        return Some(info);
+                    }
+
+                    let mut info = StackFrameInfo::prepare(meta);
+                    info.address = address;
+
+                    let process = self.process_cache.get(meta.tid as usize);
+                    if process.is_none() {
+                        println!("Empty process cache entry shouldn't happen");
+                        return Some(info);
+                    }
+
+                    let mapper = &process.unwrap().mapper;
+                    if mapper.is_none() {
+                        return Some(info);
+                    }
+                    mapper.as_ref().unwrap().lookup(address as _, &mut info);
+
+                    info.resolve(self, meta.tid as _);
+
+                    self.addr_cache.insert(meta.tid as _, &info);
+
+                    Some(info)
+                } else {
+                    None
                 }
-
-                let mut info = StackFrameInfo::prepare(meta);
-
-                let process = self.process_cache.get(meta.tid as usize);
-                if process.is_none() {
-                    println!("Empty process cache entry shouldn't happen");
-                    return info;
-                }
-
-                let mapper = &process.unwrap().mapper;
-                if mapper.is_none() {
-                    return info;
-                }
-                mapper.as_ref().unwrap().lookup(address as _, &mut info);
-
-                info.resolve(address, self, meta.tid as _);
-
-                self.addr_cache.insert(meta.tid as _, address, &info);
-
-                info
             })
             .collect::<Vec<_>>();
         user_stack
@@ -155,16 +169,36 @@ impl SymbolFinder {
         let kernel_stacks = kernel_stack.map(|trace| self.resolve_kernel_trace(&trace, meta));
         let user_stacks = user_stack.map(|trace| self.resolve_user_trace(&trace, meta));
 
-        let combined = match (kernel_stacks, user_stacks) {
+        match (kernel_stacks, user_stacks) {
             (Some(kernel_stacks), None) => kernel_stacks,
             (None, Some(user_stacks)) => user_stacks,
             (Some(kernel_stacks), Some(user_stacks)) => kernel_stacks
                 .into_iter()
-                .chain(user_stacks.into_iter())
+                .chain(user_stacks)
                 .collect::<Vec<_>>(),
             _ => Default::default(),
-        };
-        combined
+        }
+    }
+
+    fn is_a_valid_addr(ip: u64) -> bool {
+        match ip {
+            0..=0x0000_7FFF_FFFF_FFFF => {
+                // "User space"
+                true
+            }
+            0xFFFF_8000_0000_0000..=0xFFFF_FFFF_FFFF_FFFE => {
+                // "Kernel space"
+                true
+            }
+            0xFFFF_FFFF_FFFF_FFFF => {
+                // "Invalid (bogus / EFAULT)"
+                false
+            }
+            _ => {
+                // "Non-canonical / reserved"
+                false
+            }
+        }
     }
 }
 
@@ -238,7 +272,7 @@ impl StackFrameInfo {
     }
 
     /// Based on virtual address calculated from proc maps, resolve symbols
-    pub fn resolve(&mut self, virtual_address: u64, finder: &mut SymbolFinder, id: usize) {
+    pub fn resolve(&mut self, finder: &mut SymbolFinder, id: usize) {
         if self.object_path().is_none() {
             // println!(
             //     "[frame] [unknown] {:#16x} {} ({:#16x})",
@@ -309,8 +343,6 @@ impl StackFrameInfo {
                 }
                 Ok(loader) => loader,
             };
-
-            // finder.use_dwarf
 
             let item = ObjItem {
                 ctx: Some(loader),
@@ -421,12 +453,12 @@ impl StackFrameInfo {
 
     pub fn fmt_symbol(&self) -> String {
         format!(
-            "{}{}",
+            "{} ({})",
             self.symbol.as_deref().unwrap_or(
                 //"[unknown]"
                 format!("{}+{:#x}", self.fmt_object(), self.address).as_str()
             ),
-            self.fmt_source(),
+            self.fmt_source()
         )
     }
 
@@ -464,10 +496,10 @@ impl StackFrameInfo {
         //     s.last()
         // });
 
-        let short = self.fmt_shorter_source(4);
+        // let short = self.fmt_shorter_source(4);
 
-        if short.is_some() {
-            format!(" ({})", short.unwrap())
+        if self.source.is_some() {
+            format!(" ({})", self.source.as_ref().unwrap())
         } else {
             "".to_string()
         }

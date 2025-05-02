@@ -19,6 +19,91 @@ use crate::symbols::StackFrameInfo;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
+fn all_categories_1() -> Vec<Value> {
+    vec![
+        json!({
+            "color": "yellow",
+            "name": "User",
+            "subcategories": ["Other"]
+        }),
+        json!({
+            "color": "orange",
+            "name": "Kernel",
+            "subcategories": ["Other"]
+        }),
+        json!({
+            "color": "yellow",
+            "name": "Native",
+            "subcategories": ["Other"]
+        }),
+        json!({
+            "color": "green",
+            "name": "DEX",
+            "subcategories": ["Other"]
+        }),
+        json!({
+            "color": "green",
+            "name": "OAT",
+            "subcategories": ["Other"]
+        }),
+        json!({
+            "color": "blue",
+            "name": "Off-CPU",
+            "subcategories": ["Other"]
+        }),
+        json!({
+            "color": "grey",
+            "name": "Other",
+            "subcategories": ["Other"]
+        }),
+        json!({
+            "color": "green",
+            "name": "JIT",
+            "subcategories": ["Other"]
+        }),
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(u8)]
+#[serde(rename_all = "PascalCase")]
+pub enum Category {
+    User = 0,
+    Kernel = 1,
+    Native = 2,
+    Dex = 3,
+    Oat = 4,
+    OffCpu = 5,
+    Jit = 6,
+    Other = 7,
+}
+
+fn categorize_frame(dso_path: &str, symbol: &str) -> Category {
+    let path = dso_path.to_lowercase();
+
+    if path.contains("libart") || path.contains("dex") {
+        Category::Dex
+    } else if path.contains("oat") {
+        Category::Oat
+    } else if path.contains("jit") {
+        Category::Jit
+    } else if path.contains("lib") || path.ends_with(".so") || path.contains(".so.") {
+        Category::Native
+    } else if path.contains("kernel")
+        || path.contains("[k")
+        || symbol.starts_with("__")
+        || symbol.starts_with("do_")
+    {
+        Category::Kernel
+    } else if path.contains("perf_event") || path.contains("offcpu") {
+        Category::OffCpu
+    } else if path.contains("usr") || path.contains("bin") || path.contains("sbin") {
+        Category::User
+    } else {
+        Category::Other
+    }
+}
+
 #[derive(Debug)]
 pub struct ProfileBuilder {
     pid: u32,
@@ -131,16 +216,7 @@ impl ProfileBuilder {
                 "interval": self.interval.as_secs_f64() * 1000.0,
                 "pid": self.pid,
                 "processType": 0,
-                "categories": [
-                    {
-                        "name": "Regular",
-                        "color": "blue",
-                    },
-                    {
-                        "name": "Other",
-                        "color": "grey",
-                    }
-                ],
+                "categories": all_categories_1(),
                 "sampleUnits": {
                     "time": "ms",
                     "eventDelay": "ms",
@@ -214,7 +290,7 @@ impl ThreadBuilder {
         stack_frames: &Vec<StackFrameInfo>,
         cpu_delta: u64,
     ) -> Option<usize> {
-        let stack_index = self.stack_index_for_frames(&stack_frames);
+        let stack_index = self.stack_index_for_frames(stack_frames);
         self.samples.0.push(Sample {
             timestamp,
             stack_index,
@@ -240,7 +316,7 @@ impl ThreadBuilder {
         self.end_time = Some(end_time);
     }
 
-    fn stack_index_for_frames(&mut self, stack_frames: &Vec<StackFrameInfo>) -> Option<usize> {
+    fn stack_index_for_frames(&mut self, stack_frames: &[StackFrameInfo]) -> Option<usize> {
         let frame_indexes: Vec<_> = stack_frames
             .iter()
             .map(|f| self.frame_index_for_address(f))
@@ -374,7 +450,7 @@ impl StackTable {
 #[derive(Debug)]
 struct FrameTable {
     // [string_index]
-    frames: Vec<usize>,
+    frames: Vec<(usize, Category)>,
 
     // address -> frame index
     index: BTreeMap<u64, usize>,
@@ -397,8 +473,24 @@ impl FrameTable {
         *self.index.entry(frame.address).or_insert_with(|| {
             let frame_index = frames.len();
             let location_string = frame.fmt_symbol();
+            let obj_path = if frame.object_path().is_some() {
+                frame.object_path().unwrap().to_str().unwrap()
+            } else {
+                "unknown"
+            };
+            let symbol = if frame.symbol.is_some() {
+                frame.symbol.as_ref().unwrap().as_str()
+            } else {
+                frame.fmt_object()
+            };
+            let category = categorize_frame(obj_path, symbol);
+            // println!("Symbol: {:?}", location_string);
+            // println!(
+            //     "Frame Symbols: {:?} {:?} {:?}",
+            //     &frame.symbol, &frame.object_path, &frame.source
+            // );
             let location_string_index = string_table.index_for_string(&location_string);
-            frames.push(location_string_index);
+            frames.push((location_string_index, category));
             frame_index
         })
     }
@@ -407,9 +499,19 @@ impl FrameTable {
         let data: Vec<Value> = self
             .frames
             .iter()
-            .map(|location| {
-                let category = 0;
-                json!([*location, false, null, null, null, null, category])
+            .map(|(location, category)| {
+                // TODO: Determine category
+                let subcategory = 0;
+                json!([
+                    *location,
+                    false,
+                    null,
+                    null,
+                    null,
+                    null,
+                    *category as u8,
+                    subcategory
+                ])
             })
             .collect();
         json!({
@@ -421,6 +523,7 @@ impl FrameTable {
                 "line": 4,
                 "column": 5,
                 "category": 6,
+                "subcategory": 7,
             },
             "data": data
         })

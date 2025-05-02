@@ -28,18 +28,11 @@ impl Profiler {
         stack_info: &StackInfo,
         stack_traces: &StackTraceMap<MapData>,
     ) -> Vec<StackFrameInfo> {
-        let ktrace_id = stack_info.kernel_stack_id;
-        let utrace_id = stack_info.user_stack_id;
-
         // if let Some(stacks) = self.cache.get(ktrace_id, utrace_id) {
         //     return stacks;
         // }
 
-        let stacks = Self::format_stack_trace(stack_info, stack_traces, &mut self.symbols);
-
-        // self.cache.insert(ktrace_id, utrace_id, stacks.clone());
-
-        stacks
+        Self::format_stack_trace(stack_info, stack_traces, &mut self.symbols)
     }
 
     /// converts pointers from bpf to usable, symbol resolved stack information

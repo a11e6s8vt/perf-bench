@@ -62,6 +62,7 @@ pub struct StackInfo {
     pub user_stack_id: i64,
     pub kernel_stack_id: i64,
     pub name: String,
+    pub is_kernel_thread: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +73,7 @@ struct Thread {
     pid: Option<i32>,
     name: Option<String>,
     samples: Vec<Sample2>,
+    is_kernel_thread: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -118,13 +120,13 @@ async fn main() -> anyhow::Result<()> {
     let start_timestamp_ns = get_timestamp_ns();
 
     // Load and attach the tracepoint for sched_process_fork
-    let tp: &mut TracePoint = ebpf_guard
-        .program_mut("handle_fork")
-        .unwrap()
-        .try_into()
-        .unwrap();
-    tp.load()?;
-    tp.attach("sched", "sched_process_fork")?;
+    // let tp: &mut TracePoint = ebpf_guard
+    //     .program_mut("handle_fork")
+    //     .unwrap()
+    //     .try_into()
+    //     .unwrap();
+    // tp.load()?;
+    // tp.attach("sched", "sched_process_fork")?;
 
     // Load and attach the tracepoint for context switches
     let tp: &mut TracePoint = ebpf_guard
@@ -158,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
 
     // This will raise scheduled events on each CPU at 1000000 HZ, triggered by the kernel based
     // on clock ticks.
-    const SAMPLE_PERIOD: u64 = 99999;
+    const SAMPLE_PERIOD: u64 = 999999;
     let program_perf_event: &mut PerfEvent =
         ebpf_guard.program_mut("cpu_clock").unwrap().try_into()?;
     program_perf_event.load()?;
@@ -212,48 +214,6 @@ async fn main() -> anyhow::Result<()> {
         proc_maps_by_pid
     });
 
-    let mut sched_switch_join_handles = Vec::new();
-
-    for cpu in online_cpus().map_err(|(_, error)| error)? {
-        let mut buf = switch_events_array.open(cpu, Some(2))?;
-        let mut rx_proc_maps_termination1 = rx.clone();
-        let task: JoinHandle<Result<_, anyhow::Error>> = task::spawn(async move {
-            const SAMPLE_SIZE: usize = 60;
-            const BUFFER_COUNT: usize = 10;
-            let mut buffers = Vec::with_capacity(BUFFER_COUNT);
-            let mut current_buffer = BytesMut::with_capacity(SAMPLE_SIZE * BUFFER_COUNT);
-            for _ in 0..BUFFER_COUNT {
-                let rest = current_buffer.split_off(SAMPLE_SIZE);
-                buffers.push(current_buffer);
-                current_buffer = rest;
-            }
-            let mut tid_comm_map: HashMap<i32, (i32, String)> = HashMap::new();
-            loop {
-                tokio::select! {
-                    _termination_message = rx_proc_maps_termination1.changed() => {
-                            // Terminated.
-                            break;
-                    }
-                    events = buf.read_events(&mut buffers) => {
-                        let events = events?;
-                        for buf in buffers.iter_mut().take(events.read) {
-                            let data = unsafe { (buf.as_ptr() as *const SchedSwitchEvent).read_unaligned() };
-                            // let comm = String::from_utf8_lossy(&data.comm).trim().to_string();
-                            let comm = if let Ok(comm) = CStr::from_bytes_until_nul(&data.comm) {
-                                comm.to_string_lossy().to_string()
-                            } else {
-                                "unnamed".to_string()
-                            };
-                            tid_comm_map.entry(data.tid).or_insert((data.pid, comm));
-                        }
-                    }
-                }
-            }
-            Ok(tid_comm_map)
-        });
-        sched_switch_join_handles.push(task);
-    }
-
     let mut join_handles = Vec::new();
 
     for cpu in online_cpus().map_err(|(_, error)| error)? {
@@ -292,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
                                     pid: None,
                                     name: None,
                                     samples: Vec::new(),
+                                    is_kernel_thread: data.is_kernel_thread
                                 }
                             });
 
@@ -305,13 +266,7 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             if thread_entry.name.is_none() {
-                                if let Ok(name) = CStr::from_bytes_with_nul(&data.thread_name) {
-                                    if let Ok(name) = name.to_str() {
-                                        thread_entry.name = Some(name.to_string());
-                                    } else {
-                                        thread_entry.name = Some(get_thread_name(data.pid, data.tid));
-                                    }
-                                }
+                                thread_entry.name = Some(comm_to_string(data.thread_name));
                             }
 
                             if data.is_on_cpu != 0 {
@@ -323,12 +278,13 @@ async fn main() -> anyhow::Result<()> {
                                     on_cpu: true,
                                 });
                                 // println!(
-                                //     "{} | SAMPLE {:?} [{}]: ACTIVE with {}us CPU delta, stack {}",
+                                //     "{} | SAMPLE {:?} [{}]: ACTIVE with {}us CPU delta, stack {}, is_kernel_thread {}",
                                 //     data.timestamp,
-                                //     thread_entry.name,
+                                //     comm_to_string(data.thread_name),
                                 //     data.tid,
                                 //     data.cpu_delta / 1000,
-                                //     data.stack_id,
+                                //     data.user_stack_id,
+                                //     data.is_kernel_thread
                                 // );
                             } else {
                                 let count = data.off_cpu_sample_count as u64;
@@ -350,12 +306,13 @@ async fn main() -> anyhow::Result<()> {
                                     });
                                 }
                                 // println!(
-                                //     "{} | SAMPLE {:?} [{}]: INACTIVE with {}us CPU delta, stack {}",
+                                //     "{} | SAMPLE {:?} [{}]: INACTIVE with {}us CPU delta, stack {}, is_kernel_thread: {}",
                                 //     data.timestamp,
-                                //     thread_entry.name,
+                                //     comm_to_string(data.thread_name),
                                 //     data.tid,
                                 //     data.cpu_delta / 1000,
-                                //     data.stack_id,
+                                //     data.user_stack_id,
+                                //     data.is_kernel_thread
                                 // );
                             }
                         }
@@ -374,74 +331,31 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("bpf is dropped");
     termination_signal_sender.send(true)?;
     eprintln!("termination signal has been sent");
-    let (proc_maps_by_pid, tid_comm_map, results) = join!(
-        get_proc_maps,
-        join_all(sched_switch_join_handles),
-        join_all(join_handles)
-    );
-    // let (proc_maps_by_pid, results) = join!(get_proc_maps, join_all(join_handles));
+    let (proc_maps_by_pid, results) = join!(get_proc_maps, join_all(join_handles));
+
+    // `thread_vecs` contains entries corresponding to each cpu. Merging it into one.
     let thread_vecs: Vec<Vec<_>> = results
         .into_iter()
         .filter_map(Result::ok)
         .filter_map(Result::ok)
         .map(|map| map.into_values().collect())
         .collect();
-    // `thread_vecs` contains entries corresponding to each cpu. Merging it
-    // into one.
     let threads = merge_threads(thread_vecs);
 
-    let sched_events = tid_comm_map
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-
-    for events in sched_events {
-        println!("{:?}", events);
-    }
-    // let tid_comm_map = merge_sched_events(sched_events_vec);
     // use std::fs::File;
     // use std::io::{BufWriter, Write};
     // let file = File::create("threads.json")?;
     // let mut writer = BufWriter::new(file);
     // serde_json::to_writer(&mut writer, &threads)?;
     // writer.flush()?;
-    // save_to_profile(
-    //     start_time,
-    //     start_timestamp_ns,
-    //     threads,
-    //     &stacks_traces,
-    //     proc_maps_by_pid?,
-    //     &mut profiler,
-    // );
-    Ok(())
-}
-
-async fn read_thread_map(
-    ebpf: Arc<Mutex<Ebpf>>,
-    thread_map: &mut HashMap<i32, (i32, String)>,
-) -> anyhow::Result<()> {
-    let mut ebpf_guard = ebpf.lock().await;
-    let thread_comm_ebpf_map: AyaMap<&mut MapData, ThreadId, CommData> = AyaMap::try_from(
-        ebpf_guard
-            .map_mut("THREAD_COMM_MAP")
-            .ok_or(anyhow!("counts not found"))?,
-    )?;
-    let mut thread_map_iter = thread_comm_ebpf_map.iter();
-
-    while let Some(Ok((thread_id, comm_data))) = thread_map_iter.next() {
-        let comm = if let Ok(comm) = CStr::from_bytes_until_nul(&comm_data.comm) {
-            comm.to_string_lossy().to_string()
-        } else {
-            "unnamed".to_string()
-        };
-
-        eprintln!("comm: {:?}", comm.clone());
-        thread_map
-            .entry(thread_id.tid)
-            .or_insert((comm_data.pid, comm));
-    }
-
+    save_to_profile(
+        start_time,
+        start_timestamp_ns,
+        threads,
+        &stacks_traces,
+        proc_maps_by_pid?,
+        &mut profiler,
+    );
     Ok(())
 }
 
@@ -494,27 +408,6 @@ fn merge_thread_into(mut thread: Thread, merged_thread: &mut Thread) {
     merged_thread.samples.append(&mut thread.samples);
 }
 
-// fn merge_sched_events(sched_events: Vec<Vec<Thread>>) -> HashMap<i32, (i32, String)> {
-//     let mut tid_comm_map = HashMap::new();
-//     for events_vec in sched_events {
-//         for event in events_vec {
-//             match tid_comm_map.get_mut(&event.) {
-//                 Some(merged_thread) => merge_thread_into(thread, merged_thread),
-//                 None => {
-//                     thread_map.insert(thread.tid, thread);
-//                 }
-//             }
-//         }
-//     }
-//     thread_map
-//         .into_values()
-//         .map(|mut thread| {
-//             thread.samples.sort_by_key(|s| s.timestamp);
-//             thread
-//         })
-//         .collect()
-// }
-
 fn save_to_profile(
     start_time: Instant,
     start_timestamp_ns: u64,
@@ -525,9 +418,11 @@ fn save_to_profile(
 ) {
     let mut root_profile_builder =
         ProfileBuilder::new(start_time, "System", 0, Duration::from_millis(1));
-    let (threads_without_pid, threads_with_pid): (Vec<_>, Vec<_>) =
-        threads.into_iter().partition(|t| t.pid.is_none());
-    let threads_by_pid = threads_with_pid
+    // let (threads_without_pid, threads_with_pid): (Vec<_>, Vec<_>) =
+    //     threads.into_iter().partition(|t| t.pid.is_none());
+    let (kernel_threads, userspace_threads): (Vec<_>, Vec<_>) =
+        threads.into_iter().partition(|t| t.is_kernel_thread);
+    let user_threads_by_pid = userspace_threads
         .into_iter()
         .into_group_map_by(|t| t.pid.unwrap());
 
@@ -535,15 +430,15 @@ fn save_to_profile(
         &mut root_profile_builder,
         &start_time,
         start_timestamp_ns,
-        threads_without_pid,
+        kernel_threads,
         stack_traces,
         profiler,
     );
 
-    for (pid, threads) in threads_by_pid {
+    for (pid, threads) in user_threads_by_pid {
         let mut process_profile_builder = ProfileBuilder::new(
             start_time,
-            "Other process",
+            "User process",
             pid as u32,
             Duration::from_millis(1),
         );
@@ -602,6 +497,8 @@ fn make_profile_thread(
         thread_builder.set_name(&name);
     }
 
+    let mut stack_info_map = HashMap::new();
+
     for sample in thread.samples {
         let timestamp_rel_ms = (sample.timestamp - start_timestamp_ns) as f64 / 1_000_000.0;
         let cpu_delta_us = (sample.cpu_delta + 500) / 1_000;
@@ -615,9 +512,8 @@ fn make_profile_thread(
             user_stack_id: sample.user_stack_id,
             kernel_stack_id: sample.kernel_stack_id,
             name: thread.name.clone().unwrap_or("unnamed".to_string()),
+            is_kernel_thread: thread.is_kernel_thread,
         };
-
-        let mut stack_info_map = HashMap::new();
 
         match stack_info_map.get(&stack_info) {
             Some(stack_index) => {
@@ -625,6 +521,7 @@ fn make_profile_thread(
             }
             None => {
                 let combined = profiler.get_stack(&stack_info, stack_traces);
+                // println!("{:?}", combined);
                 let stack_index =
                     thread_builder.add_sample(timestamp_rel_ms, &combined, cpu_delta_us);
                 stack_info_map.insert(stack_info, stack_index);
@@ -784,4 +681,9 @@ fn get_thread_name(pid: i32, tid: i32) -> String {
     } else {
         "unnamed".to_string()
     }
+}
+
+fn comm_to_string(comm: [u8; 16]) -> String {
+    let len = comm.iter().position(|&c| c == 0).unwrap_or(comm.len());
+    String::from_utf8_lossy(&comm[..len]).to_string()
 }

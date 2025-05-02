@@ -65,7 +65,7 @@ static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(102400, 0);
 #[map(name = "THREAD_TIMING")]
 static mut THREAD_TIMING: HashMap<i32, ThreadTimingData> = HashMap::with_max_entries(1024, 0);
 
-static SAMPLE_PERIOD_NS: u64 = 99999;
+static SAMPLE_PERIOD_NS: u64 = 999999;
 const PARENT_COMM_OFFSET: usize = 8;
 const PARENT_PID_OFFSET: usize = 24;
 const CHILD_COMM_OFFSET: usize = 28;
@@ -98,7 +98,20 @@ fn set_thread_timing(pid: i32, timing: &ThreadTimingData) {
 
 #[inline(always)]
 fn thread_goes_on(ctx: &impl EbpfContext, pid: i32, tgid: i32, now: u64, comm: &[u8; 16usize]) {
+    let comm_str = unsafe { core::str::from_utf8_unchecked(comm) };
     let cpu = unsafe { bpf_get_smp_processor_id() };
+    let is_kernel_thread = if let Some(info) = unsafe { TASK_INFO_MAP.get(&pid) } {
+        let is_kernel_thread = if comm_str == unsafe { core::str::from_utf8_unchecked(&info.comm) }
+        {
+            info.is_kernel_thread
+        } else {
+            false
+        };
+        is_kernel_thread
+    } else {
+        false
+    };
+
     let mut timing = get_thread_timing(pid, now, false);
     let sleep_time: u64 = now - timing.last_seen_ts;
     timing.off_cpu_wrapping_counter_ns += sleep_time;
@@ -115,7 +128,8 @@ fn thread_goes_on(ctx: &impl EbpfContext, pid: i32, tgid: i32, now: u64, comm: &
             off_cpu_sample_count: off_cpu_sample_count as u32,
             user_stack_id: timing.user_stack_when_going_off,
             kernel_stack_id: timing.kernel_stack_when_going_off,
-            thread_name: comm.clone(),
+            thread_name: *comm,
+            is_kernel_thread,
         };
         unsafe { SAMPLES.output(ctx, &sample, 0) };
         timing.cpu_delta_since_last_sample_ns = 0;
@@ -153,6 +167,14 @@ fn thread_gets_sampled_while_on(
     now: u64,
     comm: [u8; 16],
 ) {
+    let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    // debug!(
+    //     ctx,
+    //     "tgswo - next_tgid: {} {} {}",
+    //     ctx.tgid(),
+    //     ctx.pid(),
+    //     comm_str
+    // );
     let mut timing = get_thread_timing(pid, now, true);
     if timing.active == 0 {
         return;
@@ -168,6 +190,26 @@ fn thread_gets_sampled_while_on(
         Err(e) => e,
     };
 
+    let is_kernel_thread = if let Some(info) = unsafe { TASK_INFO_MAP.get(&pid) } {
+        let is_kernel_thread = if unsafe { core::str::from_utf8_unchecked(&comm) }
+            == unsafe { core::str::from_utf8_unchecked(&info.comm) }
+        {
+            info.is_kernel_thread
+        } else {
+            false
+        };
+        is_kernel_thread
+    } else {
+        false
+    };
+
+    // debug!(
+    //     &ctx,
+    //     "next_tgid: {} {} {}",
+    //     next_tgid,
+    //     next_pid,
+    //     core::str::from_utf8_unchecked(&next_comm)
+    // );
     let sample = Sample {
         cpu,
         timestamp: now,
@@ -178,25 +220,12 @@ fn thread_gets_sampled_while_on(
         off_cpu_sample_count: 0,
         user_stack_id,
         kernel_stack_id,
-        thread_name: comm.clone(),
+        thread_name: comm,
+        is_kernel_thread,
     };
 
-    let is_kernel_thread = if let Some(info) = unsafe { TASK_INFO_MAP.get(&pid) } {
-        let is_kernel_thread = if unsafe { core::str::from_utf8_unchecked(&comm) }
-            == unsafe { core::str::from_utf8_unchecked(&info.comm) }
-        {
-            info.is_kernel_thread as u8
-        } else {
-            0
-        };
-        is_kernel_thread
-    } else {
-        0
-    };
-
-    let comm = unsafe { core::str::from_utf8_unchecked(&comm) };
-    debug!(ctx, "tgid: {} {} {} {}", tgid, pid, comm, is_kernel_thread);
     unsafe { SAMPLES.output(ctx, &sample, 0) };
+
     timing.cpu_delta_since_last_sample_ns = 0;
     timing.last_seen_ts = now;
     set_thread_timing(pid, &timing);
@@ -212,7 +241,7 @@ pub fn handle_fork(ctx: TracePointContext) -> u32 {
 
 #[inline(always)]
 pub unsafe fn try_handle_fork(ctx: &TracePointContext) -> Result<(), i64> {
-    info!(ctx, "hello from eBPF!");
+    // info!(ctx, "hello from eBPF!");
     let parent_pid = bpf_probe_read(
         ctx.as_ptr()
             .offset(offset_of!(trace_event_raw_sched_process_fork, parent_pid) as isize)
@@ -264,7 +293,7 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
     let now = bpf_ktime_get_ns();
 
     if prev_pid != 0 {
-        let prev_tgid = 0; // TODO
+        let prev_tgid = 0;
         let prev_comm_offset = core::mem::offset_of!(trace_event_raw_sched_switch, prev_comm);
         let prev_comm = unsafe {
             bpf_probe_read(ctx.as_ptr().offset(prev_comm_offset as isize)
@@ -321,14 +350,6 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
         //     next_pid,
         //     core::str::from_utf8_unchecked(&next_comm)
         // );
-        let data = SchedSwitchEvent {
-            tid: next_pid,
-            pid: next_tgid as i32,
-            comm: next_comm,
-        };
-
-        SCHED_SWITCH_EVENTS.output(&ctx, &data, 0);
-
         thread_goes_on(&ctx, next_pid, next_tgid as i32, now, &next_comm);
     }
     Ok(0)
@@ -363,6 +384,8 @@ pub fn cpu_clock(ctx: PerfEventContext) -> Result<u32, i64> {
         Ok(c) => c,
         Err(ret) => return Err(ret),
     };
+    // let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    // debug!(&ctx, "next_tgid: {} {} {}", ctx.tgid(), ctx.pid(), comm_str);
 
     thread_gets_sampled_while_on(&ctx, cpu, ctx.pid() as i32, ctx.tgid() as i32, now, comm);
 

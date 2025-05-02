@@ -62,8 +62,8 @@ impl AddrCache {
         None
     }
 
-    pub fn insert(&mut self, tgid: i32, address: u64, info: &StackFrameInfo) {
-        self.map.insert((tgid, address), info.clone());
+    pub fn insert(&mut self, tgid: i32, info: &StackFrameInfo) {
+        self.map.insert((tgid, info.address), info.clone());
     }
 
     pub fn stats(&self) -> String {

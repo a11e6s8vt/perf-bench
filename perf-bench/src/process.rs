@@ -110,6 +110,7 @@ impl ProcessMapper {
         flags.contains(MMPermissions::READ)
     }
 
+    // mapping eBPF tracked virtual addresses (frame.ip) to DSO or executable
     pub fn lookup(&self, address: usize, info: &mut StackFrameInfo) {
         for m in &self.maps {
             let start = m.address.0 as usize;
