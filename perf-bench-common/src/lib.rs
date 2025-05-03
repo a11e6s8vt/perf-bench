@@ -2,13 +2,19 @@
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LogEvent {
-    pub tag: u64,
-    pub field: u64,
+pub struct ProcessExecEvent {
+    pub tid: i32,
+    pub pid: i32,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub comm: [u8; 16],
 }
 
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for LogEvent {}
+unsafe impl Send for ProcessExecEvent {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ProcessExecEvent {}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

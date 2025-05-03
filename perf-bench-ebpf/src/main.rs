@@ -12,15 +12,15 @@ use core::{ffi::CStr, ptr::null};
 use aya_ebpf::{
     bindings::BPF_F_USER_STACK,
     bpf_printk,
-    cty::{c_char, c_schar},
+    cty::{c_char, c_long, c_schar},
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task_btf,
         bpf_get_smp_processor_id, bpf_ktime_get_ns, bpf_probe_read, bpf_probe_read_kernel,
         bpf_probe_read_kernel_str_bytes, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
     },
-    macros::{fentry, kprobe, map, perf_event, tracepoint},
+    macros::{kprobe, map, perf_event, tracepoint, uprobe, uretprobe},
     maps::{HashMap, PerfEventArray, StackTrace},
-    programs::{FEntryContext, PerfEventContext, ProbeContext, TracePointContext},
+    programs::{PerfEventContext, ProbeContext, RetProbeContext, TracePointContext},
     EbpfContext,
 };
 use aya_log_ebpf::{debug, error, info};
@@ -29,7 +29,7 @@ use bindings::{
     trace_event_raw_sched_switch,
 };
 use memoffset::offset_of;
-use perf_bench_common::{CommData, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
+use perf_bench_common::{CommData, ProcessExecEvent, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
 use sched_process_fork::trace_event_raw_sched_process_fork;
 
 #[derive(Clone)]
@@ -52,9 +52,9 @@ struct ThreadTimingData {
 static mut TASK_INFO_MAP: HashMap<i32, TaskInfo> =
     HashMap::<i32, TaskInfo>::with_max_entries(102400, 0);
 
-#[map(name = "SCHED_SWITCH_EVENTS")]
-static mut SCHED_SWITCH_EVENTS: PerfEventArray<SchedSwitchEvent> =
-    PerfEventArray::<SchedSwitchEvent>::new(0);
+#[map(name = "PROBED_PID_MAP")]
+static mut PROBED_PID_MAP: HashMap<i32, ProcessExecEvent> =
+    HashMap::<i32, ProcessExecEvent>::with_max_entries(1024, 0);
 
 #[map(name = "SAMPLES")]
 static mut SAMPLES: PerfEventArray<Sample> = PerfEventArray::<Sample>::new(0);
@@ -231,43 +231,63 @@ fn thread_gets_sampled_while_on(
     set_thread_timing(pid, &timing);
 }
 
-#[tracepoint]
-pub fn handle_fork(ctx: TracePointContext) -> u32 {
-    match unsafe { try_handle_fork(&ctx) } {
-        Ok(_) => 0,
-        Err(_) => 1,
+#[uprobe]
+pub fn trace_uprobe_entry(ctx: ProbeContext) -> i32 {
+    info!(&ctx, "entry called");
+    match unsafe { try_trace_uprobe_entry(&ctx) } {
+        Ok(ret) => ret,
+        Err(ret) => ret as i32,
     }
 }
 
-#[inline(always)]
-pub unsafe fn try_handle_fork(ctx: &TracePointContext) -> Result<(), i64> {
-    // info!(ctx, "hello from eBPF!");
-    let parent_pid = bpf_probe_read(
-        ctx.as_ptr()
-            .offset(offset_of!(trace_event_raw_sched_process_fork, parent_pid) as isize)
-            as *const pid_t,
-    )?;
-    let parent_comm_offset = core::mem::offset_of!(trace_event_raw_sched_process_fork, parent_comm);
-    let parent_comm = unsafe {
-        bpf_probe_read(ctx.as_ptr().offset(parent_comm_offset as isize)
-            as *const [::aya_ebpf::cty::c_uchar; 16usize])?
-    };
-    // let parent_comm = core::str::from_utf8_unchecked(&parent_comm);
+unsafe fn try_trace_uprobe_entry(ctx: &ProbeContext) -> Result<i32, c_long> {
+    let tid = ctx.pid() as pid_t;
+    let pid = ctx.tgid() as pid_t;
+    let comm = ctx.command()?;
 
-    let child_pid = bpf_probe_read(
-        ctx.as_ptr()
-            .offset(offset_of!(trace_event_raw_sched_process_fork, child_pid) as isize)
-            as *const pid_t,
-    )?;
-    let child_comm_offset = core::mem::offset_of!(trace_event_raw_sched_process_fork, child_comm);
-    let child_comm = unsafe {
-        bpf_probe_read(ctx.as_ptr().offset(child_comm_offset as isize)
-            as *const [::aya_ebpf::cty::c_uchar; 16usize])?
+    let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    let now = bpf_ktime_get_ns();
+    info!(ctx, "entry updated {} {} {}", pid, tid, comm_str);
+    let info = ProcessExecEvent {
+        tid,
+        pid,
+        comm,
+        start_time: now,
+        end_time: 0,
     };
+    PROBED_PID_MAP.insert(&tid, &info, 0)?;
 
-    // // bpf_printk!(b"---------------- command: %s", child_comm.as_ptr());
-    //
-    Ok(())
+    Ok(0)
+}
+
+#[uretprobe]
+pub fn trace_uprobe_exit(ctx: RetProbeContext) -> i32 {
+    info!(&ctx, "exit called");
+    match unsafe { try_trace_uprobe_exit(&ctx) } {
+        Ok(ret) => ret,
+        Err(ret) => ret as i32,
+    }
+}
+
+unsafe fn try_trace_uprobe_exit(ctx: &RetProbeContext) -> Result<i32, c_long> {
+    let tid = ctx.pid() as pid_t;
+    let pid = ctx.tgid() as pid_t;
+    let comm = ctx.command()?;
+
+    let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    let now = bpf_ktime_get_ns();
+    if let Some(exec_event) = unsafe { PROBED_PID_MAP.get(&tid) } {
+        let exec_event = ProcessExecEvent {
+            tid: exec_event.tid,
+            pid: exec_event.pid,
+            comm: exec_event.comm,
+            start_time: exec_event.start_time,
+            end_time: exec_event.end_time,
+        };
+        PROBED_PID_MAP.insert(&tid, &exec_event, 0);
+    }
+    info!(ctx, "exit updated {} {} {}", pid, tid, comm_str);
+    Ok(0)
 }
 
 #[tracepoint]

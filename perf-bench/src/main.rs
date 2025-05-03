@@ -5,40 +5,28 @@ mod profiler;
 mod symbols;
 
 use crate::profiler::Profiler;
-use anyhow::anyhow;
 use aya::{
-    maps::{
-        perf::{AsyncPerfEventArray, PerfBufferError},
-        HashMap as AyaMap, MapData, StackTraceMap,
-    },
-    programs::{
-        perf_event, FEntry, KProbe, PerfEvent, PerfEventScope, RawTracePoint, SamplePolicy,
-        TracePoint,
-    },
+    maps::{perf::AsyncPerfEventArray, HashMap as AyaMap, MapData, StackTraceMap},
+    programs::{perf_event, KProbe, PerfEvent, TracePoint, UProbe},
     util::online_cpus,
-    Ebpf,
 };
-use aya_log::EbpfLogger;
 use bytes::BytesMut;
-use cache::ProcessCache;
 use futures::{future::join_all, join};
 use gecko_profile::{ProfileBuilder, ThreadBuilder};
 use itertools::Itertools;
-use object::{Object, ObjectSection, SectionKind};
+use object::{Object, ObjectSection, ObjectSymbol, SectionKind};
 use proc_maps::MapRange;
-use process::ProcessInfo;
 use procfs::process::Process;
+use rustc_demangle::demangle;
 use serde::{Deserialize, Serialize};
 use serde_json::to_writer;
-use std::cmp;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{cmp, io::Read};
 use std::{
     collections::{HashMap, HashSet},
     convert::{TryFrom, TryInto},
     env,
-    ffi::CStr,
     fs::{self, File},
-    io::BufWriter,
+    io::{BufReader, BufWriter},
     ops::Range,
     path::Path,
     sync::Arc,
@@ -53,7 +41,13 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use perf_bench_common::{CommData, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
+use perf_bench_common::{CommData, ProcessExecEvent, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
+
+#[derive(Debug, Deserialize)]
+struct Inputs {
+    binary: String,
+    functions: Vec<String>,
+}
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct StackInfo {
@@ -87,6 +81,31 @@ struct Sample2 {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let inputs_path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), "inputs.json");
+    let file = File::open(&inputs_path)?;
+    let reader = BufReader::new(file);
+
+    // Deserialize JSON into the struct
+    let inputs: Inputs = serde_json::from_reader(reader)?;
+    let target_bin = inputs.binary;
+    let target_funcs = inputs.functions;
+
+    let mut file = File::open(&target_bin)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    let obj_file = object::File::parse(&*buffer)?;
+    let mut func_address_map: Vec<(String, u64)> = Vec::new();
+
+    for symbol in obj_file.symbols() {
+        if let Ok(name) = symbol.name() {
+            let demangled_symbol = demangle(name).to_string();
+            if target_funcs.iter().any(|p| demangled_symbol.contains(p)) {
+                func_address_map.push((name.to_string(), symbol.address()));
+            }
+        }
+    }
+
     env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
@@ -104,11 +123,10 @@ async fn main() -> anyhow::Result<()> {
     // runtime. This approach is recommended for most real-world use cases. If you would
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
-    let mut ebpf = Arc::new(Mutex::new(aya::Ebpf::load(aya::include_bytes_aligned!(
+    let ebpf = Arc::new(Mutex::new(aya::Ebpf::load(aya::include_bytes_aligned!(
         concat!(env!("OUT_DIR"), "/perf-bench")
     ))?));
 
-    let mut ebpf1 = ebpf.clone();
     let mut ebpf_guard = ebpf.lock().await;
 
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf_guard) {
@@ -119,14 +137,26 @@ async fn main() -> anyhow::Result<()> {
     let start_time = Instant::now();
     let start_timestamp_ns = get_timestamp_ns();
 
-    // Load and attach the tracepoint for sched_process_fork
-    // let tp: &mut TracePoint = ebpf_guard
-    //     .program_mut("handle_fork")
-    //     .unwrap()
-    //     .try_into()
-    //     .unwrap();
-    // tp.load()?;
-    // tp.attach("sched", "sched_process_fork")?;
+    let uprobe_program: &mut UProbe = ebpf_guard
+        .program_mut("trace_uprobe_entry")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    uprobe_program.load()?;
+
+    for (func, address_offset) in &func_address_map {
+        uprobe_program.attach(None, *address_offset, target_bin.as_str(), None)?;
+    }
+
+    let uret_program: &mut UProbe = ebpf_guard
+        .program_mut("trace_uprobe_exit")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    uret_program.load()?;
+    for (func, address_offset) in func_address_map {
+        uret_program.attach(None, address_offset, target_bin.as_str(), None)?;
+    }
 
     // Load and attach the tracepoint for context switches
     let tp: &mut TracePoint = ebpf_guard
@@ -176,8 +206,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut perf_array = AsyncPerfEventArray::try_from(ebpf_guard.take_map("SAMPLES").unwrap())?;
     let stacks_traces = StackTraceMap::try_from(ebpf_guard.take_map("STACK_TRACES").unwrap())?;
-    let mut switch_events_array =
-        AsyncPerfEventArray::try_from(ebpf_guard.take_map("SCHED_SWITCH_EVENTS").unwrap())?;
 
     let mut profiler = Profiler::new();
 
@@ -326,6 +354,14 @@ async fn main() -> anyhow::Result<()> {
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
     ctrl_c.await?;
+    let events: AyaMap<_, i32, ProcessExecEvent> =
+        AyaMap::try_from(ebpf_guard.take_map("PROBED_PID_MAP").unwrap())?;
+    let mut iter = events.iter();
+
+    while let Some(Ok((key, value))) = iter.next() {
+        println!("PID: {}, Value: {:?}", key, value);
+    }
+
     println!("Exiting...");
     drop(ebpf_guard);
     eprintln!("bpf is dropped");

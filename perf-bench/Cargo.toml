@@ -13,6 +13,7 @@ addr2line = { workspace = true }
 blazesym = { workspace = true }
 bytes = { workspace = true }
 env_logger = { workspace = true }
+clap = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 libc = { workspace = true }
@@ -21,6 +22,7 @@ memmap2 = { workspace = true }
 object = { workspace = true, features = ["std", "read_core", "elf", "unaligned"] } 
 proc-maps = { workspace = true }
 procfs = { workspace = true }
+rustc-demangle = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
