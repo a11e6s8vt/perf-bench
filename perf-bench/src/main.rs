@@ -1,4 +1,5 @@
 mod cache;
+mod gecko_markers;
 mod gecko_profile;
 mod process;
 mod profiler;
@@ -11,6 +12,7 @@ use aya::{
     util::online_cpus,
 };
 use bytes::BytesMut;
+use clap::Parser;
 use futures::{future::join_all, join};
 use gecko_profile::{ProfileBuilder, ThreadBuilder};
 use itertools::Itertools;
@@ -28,7 +30,7 @@ use std::{
     fs::{self, File},
     io::{BufReader, BufWriter},
     ops::Range,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -43,10 +45,15 @@ use uuid::Uuid;
 
 use perf_bench_common::{CommData, ProcessExecEvent, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
 
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
 #[derive(Debug, Deserialize)]
-struct Inputs {
-    binary: String,
-    functions: Vec<String>,
+struct CliInputs {
+    #[arg(short, long, value_name = "binary")]
+    binary: PathBuf,
+
+    #[arg(short, long, value_name = "function")]
+    function: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -81,14 +88,10 @@ struct Sample2 {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let inputs_path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), "inputs.json");
-    let file = File::open(&inputs_path)?;
-    let reader = BufReader::new(file);
+    let inputs = CliInputs::parse();
 
-    // Deserialize JSON into the struct
-    let inputs: Inputs = serde_json::from_reader(reader)?;
     let target_bin = inputs.binary;
-    let target_funcs = inputs.functions;
+    let target_funcs = vec![inputs.function];
 
     let mut file = File::open(&target_bin)?;
     let mut buffer = Vec::new();
@@ -145,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     uprobe_program.load()?;
 
     for (func, address_offset) in &func_address_map {
-        uprobe_program.attach(None, *address_offset, target_bin.as_str(), None)?;
+        uprobe_program.attach(None, *address_offset, &target_bin, None)?;
     }
 
     let uret_program: &mut UProbe = ebpf_guard
@@ -155,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
     uret_program.load()?;
     for (func, address_offset) in func_address_map {
-        uret_program.attach(None, address_offset, target_bin.as_str(), None)?;
+        uret_program.attach(None, address_offset, &target_bin, None)?;
     }
 
     // Load and attach the tracepoint for context switches
@@ -354,13 +357,18 @@ async fn main() -> anyhow::Result<()> {
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
     ctrl_c.await?;
-    let events: AyaMap<_, i32, ProcessExecEvent> =
+    let probed_pids: AyaMap<_, u8, ProcessExecEvent> =
         AyaMap::try_from(ebpf_guard.take_map("PROBED_PID_MAP").unwrap())?;
-    let mut iter = events.iter();
+    let mut iter = probed_pids.iter();
 
-    while let Some(Ok((key, value))) = iter.next() {
-        println!("PID: {}, Value: {:?}", key, value);
-    }
+    let probed_pid_info = if let Some(Ok(info)) = iter.next() {
+        info
+    } else {
+        eprintln!("Probed pid info not found");
+        drop(ebpf_guard);
+        return Ok(());
+    };
+    println!("probed_pids: {:?}", probed_pid_info);
 
     println!("Exiting...");
     drop(ebpf_guard);
@@ -376,7 +384,7 @@ async fn main() -> anyhow::Result<()> {
         .filter_map(Result::ok)
         .map(|map| map.into_values().collect())
         .collect();
-    let threads = merge_threads(thread_vecs);
+    let threads = merge_threads(thread_vecs, comm_to_string(probed_pid_info.1.comm));
 
     // use std::fs::File;
     // use std::io::{BufWriter, Write};
@@ -395,12 +403,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn merge_threads(thread_vecs: Vec<Vec<Thread>>) -> Vec<Thread> {
+fn merge_threads(thread_vecs: Vec<Vec<Thread>>, probed_comm: String) -> Vec<Thread> {
     let mut thread_map = HashMap::new();
     for thread_vec in thread_vecs {
         for thread in thread_vec {
             match thread_map.get_mut(&thread.tid) {
-                Some(merged_thread) => merge_thread_into(thread, merged_thread),
+                Some(merged_thread) => merge_thread_into(thread, merged_thread, &probed_comm),
                 None => {
                     thread_map.insert(thread.tid, thread);
                 }
@@ -416,7 +424,7 @@ fn merge_threads(thread_vecs: Vec<Vec<Thread>>) -> Vec<Thread> {
         .collect()
 }
 
-fn merge_thread_into(mut thread: Thread, merged_thread: &mut Thread) {
+fn merge_thread_into(mut thread: Thread, merged_thread: &mut Thread, probed_comm: &String) {
     match (thread.pid, merged_thread.pid) {
         (Some(pid), None) => {
             merged_thread.pid = Some(pid);
@@ -433,11 +441,15 @@ fn merge_thread_into(mut thread: Thread, merged_thread: &mut Thread) {
         (Some(name), None) => {
             merged_thread.name = Some(name);
         }
-        (Some(name1), Some(name2)) if &name1 != name2 => {
-            eprintln!(
-                "conflicting names for tid {}: {} != {}",
-                thread.tid, name1, name2
-            );
+        (Some(name1), Some(name2)) => {
+            if name1.contains(probed_comm) || name2.contains(probed_comm) {
+                merged_thread.name = Some(probed_comm.to_owned());
+            } else if &name1 != name2 {
+                eprintln!(
+                    "conflicting names for tid {}: {} != {}",
+                    thread.tid, name1, name2
+                );
+            }
         }
         _ => {}
     }

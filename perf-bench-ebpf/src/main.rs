@@ -53,8 +53,8 @@ static mut TASK_INFO_MAP: HashMap<i32, TaskInfo> =
     HashMap::<i32, TaskInfo>::with_max_entries(102400, 0);
 
 #[map(name = "PROBED_PID_MAP")]
-static mut PROBED_PID_MAP: HashMap<i32, ProcessExecEvent> =
-    HashMap::<i32, ProcessExecEvent>::with_max_entries(1024, 0);
+static mut PROBED_PID_MAP: HashMap<u8, ProcessExecEvent> =
+    HashMap::<u8, ProcessExecEvent>::with_max_entries(1, 0);
 
 #[map(name = "SAMPLES")]
 static mut SAMPLES: PerfEventArray<Sample> = PerfEventArray::<Sample>::new(0);
@@ -255,7 +255,7 @@ unsafe fn try_trace_uprobe_entry(ctx: &ProbeContext) -> Result<i32, c_long> {
         start_time: now,
         end_time: 0,
     };
-    PROBED_PID_MAP.insert(&tid, &info, 0)?;
+    PROBED_PID_MAP.insert(&0, &info, 0)?;
 
     Ok(0)
 }
@@ -274,19 +274,30 @@ unsafe fn try_trace_uprobe_exit(ctx: &RetProbeContext) -> Result<i32, c_long> {
     let pid = ctx.tgid() as pid_t;
     let comm = ctx.command()?;
 
-    let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
     let now = bpf_ktime_get_ns();
-    if let Some(exec_event) = unsafe { PROBED_PID_MAP.get(&tid) } {
+    if let Some(exec_event) = unsafe { PROBED_PID_MAP.get(&0) } {
+        let comm_str = unsafe { core::str::from_utf8_unchecked(&exec_event.comm) };
+        info!(
+            ctx,
+            "exit updated {} {} {} {} {}",
+            exec_event.pid,
+            exec_event.tid,
+            comm_str,
+            exec_event.start_time,
+            exec_event.end_time
+        );
         let exec_event = ProcessExecEvent {
             tid: exec_event.tid,
             pid: exec_event.pid,
             comm: exec_event.comm,
             start_time: exec_event.start_time,
-            end_time: exec_event.end_time,
+            end_time: now,
         };
-        PROBED_PID_MAP.insert(&tid, &exec_event, 0);
+        PROBED_PID_MAP.insert(&0, &exec_event, 0);
     }
-    info!(ctx, "exit updated {} {} {}", pid, tid, comm_str);
+
+    let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    info!(ctx, "exit updated {}", comm_str);
     Ok(0)
 }
 

@@ -13,7 +13,7 @@ addr2line = { workspace = true }
 blazesym = { workspace = true }
 bytes = { workspace = true }
 env_logger = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["std", "derive"] }
 futures = { workspace = true }
 itertools = { workspace = true }
 libc = { workspace = true }
