@@ -1,0 +1,177 @@
+{
+  "libs": [],
+  "meta": {
+    "categories": [
+      {
+        "color": "yellow",
+        "name": "User",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "orange",
+        "name": "Kernel",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "yellow",
+        "name": "Native",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "green",
+        "name": "DEX",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "green",
+        "name": "OAT",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "blue",
+        "name": "Off-CPU",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "grey",
+        "name": "Other",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "green",
+        "name": "JIT",
+        "subcategories": [
+          "Other"
+        ]
+      }
+    ],
+    "interval": 1.0,
+    "markerSchema": [
+      {
+        "chartLabel": "{marker.data.name}",
+        "data": [{ "format": "string", "key": "name", "label": "Details" }],
+        "display": ["marker-chart", "marker-table"],
+        "name": "Text",
+        "tableLabel": "{marker.name} - {marker.data.name}"
+      },
+      {
+      "data": [
+        { "format": "string", "key": "eventName", "label": "Event name" },
+        {
+          "format": "bytes",
+          "key": "allocationSize",
+          "label": "Allocation size"
+        },
+        { "format": "url", "key": "url", "label": "URL" },
+        { "format": "duration", "key": "latency", "label": "Latency" },
+        {
+          "label": "Description",
+          "value": "This is a test marker with a custom schema."
+        }
+      ],
+      "display": ["marker-chart", "marker-table"],
+      "name": "custom",
+      "tooltipLabel": "Custom tooltip label"
+      }
+    ],
+    "pausedRanges": [],
+    "pid": 96902,
+    "processType": 0,
+    "product": "test",
+    "sampleUnits": {
+      "eventDelay": "ms",
+      "threadCPUDelta": "µs",
+      "time": "ms"
+    },
+    "shutdownTime": null,
+    "startTime": 1746467428645.0,
+    "version": 24
+  },
+  "processes": [],
+  "threads": [
+    {
+      "frameTable": {
+        "data": [],
+        "schema": {
+          "category": 6,
+          "column": 5,
+          "implementation": 2,
+          "line": 4,
+          "location": 0,
+          "optimizations": 3,
+          "relevantForJS": 1,
+          "subcategory": 7
+        }
+      },
+      "markers": {
+        "data": [
+          [
+            1,
+            0.0,
+            2.0,
+            1,
+            0,
+            {
+              "allocationSize": 512000,
+              "eventName": "My event",
+              "latency": 123.0,
+              "type": "custom",
+              "url": "https://mozilla.org/"
+            }
+          ]
+        ],
+        "schema": {
+          "category": 4,
+          "data": 5,
+          "endTime": 2,
+          "name": 0,
+          "phase": 3,
+          "startTime": 1
+        }
+      },
+      "name": "GeckoMain",
+      "pid": 96902,
+      "processName": "test",
+      "processType": "default",
+      "registerTime": 0.0,
+      "samples": {
+        "data": [
+          [null, 0.0, 0.0, 0],
+          [null, 1.0, 0.0, 0],
+          [null, 2.0, 0.0, 0],
+          [null, 3.0, 0.0, 0]
+        ],
+        "schema": {
+          "eventDelay": 2,
+          "stack": 0,
+          "threadCPUDelta": 3,
+          "time": 1
+        }
+      },
+      "stackTable": {
+        "data": [],
+        "schema": {
+          "frame": 1,
+          "prefix": 0
+        }
+      },
+      "stringTable": ["Experimental", "CustomName"],
+      "tid": 96902,
+      "unregisterTime": null
+    }
+  ]
+}

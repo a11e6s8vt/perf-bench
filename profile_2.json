@@ -1,0 +1,939 @@
+{
+  "libs": [],
+  "meta": {
+    "categories": [
+      {
+        "color": "yellow",
+        "name": "User",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "orange",
+        "name": "Kernel",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "yellow",
+        "name": "Native",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "green",
+        "name": "DEX",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "green",
+        "name": "OAT",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "blue",
+        "name": "Off-CPU",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "grey",
+        "name": "Other",
+        "subcategories": [
+          "Other"
+        ]
+      },
+      {
+        "color": "green",
+        "name": "JIT",
+        "subcategories": [
+          "Other"
+        ]
+      }
+    ],
+    "interval": 1.0,
+    "markerSchema": [
+	    {
+	      "chartLabel": "{marker.data.name}",
+	      "data": [{ "format": "string", "key": "name", "label": "Details" }],
+	      "display": ["marker-chart", "marker-table"],
+	      "name": "Text",
+	      "tableLabel": "{marker.name} - {marker.data.name}"
+	    },
+	    {
+	      "data": [
+	        { "format": "string", "key": "eventName", "label": "Event name" },
+	        {
+	          "format": "bytes",
+	          "key": "allocationSize",
+	          "label": "Allocation size"
+	        },
+	        { "format": "url", "key": "url", "label": "URL" },
+	        { "format": "duration", "key": "latency", "label": "Latency" },
+	        {
+	          "label": "Description",
+	          "value": "This is a test marker with a custom schema."
+	        }
+	      ],
+	      "display": ["marker-chart", "marker-table"],
+	      "name": "custom",
+	      "tooltipLabel": "Custom tooltip label"
+	    }
+    ],
+    "pausedRanges": [],
+    "pid": 0,
+    "processType": 0,
+    "product": "System",
+    "sampleUnits": {
+      "eventDelay": "ms",
+      "threadCPUDelta": "µs",
+      "time": "ms"
+    },
+    "shutdownTime": null,
+    "startTime": 1746467428645.0,
+    "version": 24
+  },
+  "processes": [
+    {
+      "libs": [
+        {
+          "arch": "",
+          "breakpadId": "BC3E7D80EE03F7A3100905A1D0EDFAB20",
+          "debugName": "arkworks-examples",
+          "debugPath": "/home/ajeeshv486/workspace/personal/arkworks-examples/target/debug/arkworks-examples",
+          "end": 104667882061824,
+          "name": "arkworks-examples",
+          "offset": 0,
+          "path": "/home/ajeeshv486/workspace/personal/arkworks-examples/target/debug/arkworks-examples",
+          "start": 104667877814272
+        },
+        {
+          "arch": "",
+          "breakpadId": "924CC842F9E62681B3E2230EBFDEAD220",
+          "debugName": "libc.so.6",
+          "debugPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "end": 140369651761152,
+          "name": "libc.so.6",
+          "offset": 0,
+          "path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "start": 140369649991680
+        },
+        {
+          "arch": "",
+          "breakpadId": "52447230DD88BA2A348BF583C65F70500",
+          "debugName": "libgcc_s.so.1",
+          "debugPath": "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+          "end": 140369654255616,
+          "name": "libgcc_s.so.1",
+          "offset": 0,
+          "path": "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+          "start": 140369654091776
+        },
+        {
+          "arch": "",
+          "breakpadId": "F8B58D1CBA3B4F518FD5F1FB6D7BE9750",
+          "debugName": "ld-linux-x86-64.so.2",
+          "debugPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "end": 140369654571008,
+          "name": "ld-linux-x86-64.so.2",
+          "offset": 0,
+          "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "start": 140369654390784
+        }
+      ],
+      "meta": {
+        "categories": [
+          {
+            "color": "yellow",
+            "name": "User",
+            "subcategories": [
+              "Other"
+            ]
+          },
+          {
+            "color": "orange",
+            "name": "Kernel",
+            "subcategories": [
+              "Other"
+            ]
+          },
+          {
+            "color": "yellow",
+            "name": "Native",
+            "subcategories": [
+              "Other"
+            ]
+          },
+          {
+            "color": "green",
+            "name": "DEX",
+            "subcategories": [
+              "Other"
+            ]
+          },
+          {
+            "color": "green",
+            "name": "OAT",
+            "subcategories": [
+              "Other"
+            ]
+          },
+          {
+            "color": "blue",
+            "name": "Off-CPU",
+            "subcategories": [
+              "Other"
+            ]
+          },
+          {
+            "color": "grey",
+            "name": "Other",
+            "subcategories": [
+              "Other"
+            ]
+          },
+          {
+            "color": "green",
+            "name": "JIT",
+            "subcategories": [
+              "Other"
+            ]
+          }
+        ],
+        "interval": 1.0,
+        "markerSchema": [
+          {
+            "chartLabel": "{marker.data.name}",
+            "data": [{ "format": "string", "key": "name", "label": "Details" }],
+            "display": ["marker-chart", "marker-table"],
+            "name": "Text",
+            "tableLabel": "{marker.name} - {marker.data.name}"
+          },
+          {
+          "data": [
+            { "format": "string", "key": "eventName", "label": "Event name" },
+            {
+              "format": "bytes",
+              "key": "allocationSize",
+              "label": "Allocation size"
+            },
+            { "format": "url", "key": "url", "label": "URL" },
+            { "format": "duration", "key": "latency", "label": "Latency" },
+            {
+              "label": "Description",
+              "value": "This is a test marker with a custom schema."
+            }
+          ],
+          "display": ["marker-chart", "marker-table"],
+          "name": "custom",
+          "tooltipLabel": "Custom tooltip label"
+          }
+        ],
+        "pausedRanges": [],
+        "pid": 96902,
+        "processType": 0,
+        "product": "User process",
+        "sampleUnits": {
+          "eventDelay": "ms",
+          "threadCPUDelta": "µs",
+          "time": "ms"
+        },
+        "shutdownTime": null,
+        "startTime": 1746467428645.0,
+        "version": 14
+      },
+      "processes": [],
+      "threads": [
+        {
+          "frameTable": {
+            "data": [
+              [
+                0,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                1,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                2,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                3,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                4,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                5,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                6,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                7,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                8,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                9,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                10,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                11,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                12,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                13,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                14,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                15,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                16,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                17,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                18,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                19,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                20,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                21,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                22,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                23,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                24,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                25,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                26,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                27,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                28,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                29,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                30,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                31,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0
+              ],
+              [
+                32,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ],
+              [
+                33,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                7,
+                0
+              ]
+            ],
+            "schema": {
+              "category": 7,
+              "column": 6,
+              "implementation": 3,
+              "innerWindowID": 2,
+              "line": 5,
+              "location": 0,
+              "optimizations": 4,
+              "relevantForJS": 1,
+              "subcategory": 8
+            }
+          },
+          "markers": {
+            "data": [
+              [
+                34,
+                3500.0,
+                6700.0,
+                1,
+                0,
+                {
+                  "allocationSize": 512000,
+                  "eventName": "My event",
+                  "latency": 123.0,
+                  "type": "custom",
+                  "url": "https://mozilla.org/"
+                }
+              ]
+            ],
+            "schema": {
+              "category": 4,
+              "data": 5,
+              "endTime": 2,
+              "name": 0,
+              "phase": 3,
+              "startTime": 1
+            }
+          },
+          "name": "GeckoMain",
+          "pid": 96902,
+          "processName": "User process",
+          "processType": "default",
+          "registerTime": 0.0,
+          "samples": {
+            "data": [
+              [
+                18,
+                3035.220208,
+                0.0,
+                322154
+              ],
+              [
+                19,
+                4035.093322,
+                0.0,
+                999713
+              ],
+              [
+                32,
+                6152.787189,
+                0.0,
+                536342
+              ],
+              [
+                32,
+                7152.787188,
+                0.0,
+                0
+              ],
+              [
+                32,
+                8019.804122,
+                0.0,
+                21580
+              ],
+              [
+                32,
+                8832.710516,
+                0.0,
+                2971
+              ],
+              [
+                32,
+                9832.710515,
+                0.0,
+                0
+              ],
+              [
+                32,
+                10602.185766,
+                0.0,
+                2451
+              ],
+              [
+                33,
+                11035.11029,
+                0.0,
+                417030
+              ],
+              [
+                34,
+                12035.109878,
+                0.0,
+                999874
+              ]
+            ],
+            "schema": {
+              "eventDelay": 2,
+              "stack": 0,
+              "threadCPUDelta": 3,
+              "time": 1
+            }
+          },
+          "stackTable": {
+            "data": [
+              [
+                null,
+                0
+              ],
+              [
+                0,
+                1
+              ],
+              [
+                1,
+                2
+              ],
+              [
+                2,
+                3
+              ],
+              [
+                3,
+                4
+              ],
+              [
+                4,
+                5
+              ],
+              [
+                5,
+                6
+              ],
+              [
+                6,
+                7
+              ],
+              [
+                7,
+                8
+              ],
+              [
+                8,
+                9
+              ],
+              [
+                9,
+                10
+              ],
+              [
+                10,
+                11
+              ],
+              [
+                11,
+                12
+              ],
+              [
+                12,
+                13
+              ],
+              [
+                13,
+                14
+              ],
+              [
+                14,
+                15
+              ],
+              [
+                15,
+                16
+              ],
+              [
+                16,
+                17
+              ],
+              [
+                17,
+                18
+              ],
+              [
+                3,
+                19
+              ],
+              [
+                3,
+                20
+              ],
+              [
+                20,
+                21
+              ],
+              [
+                21,
+                22
+              ],
+              [
+                22,
+                23
+              ],
+              [
+                23,
+                24
+              ],
+              [
+                24,
+                25
+              ],
+              [
+                25,
+                26
+              ],
+              [
+                26,
+                27
+              ],
+              [
+                27,
+                28
+              ],
+              [
+                28,
+                29
+              ],
+              [
+                29,
+                30
+              ],
+              [
+                30,
+                31
+              ],
+              [
+                31,
+                31
+              ],
+              [
+                3,
+                32
+              ],
+              [
+                3,
+                33
+              ]
+            ],
+            "schema": {
+              "frame": 1,
+              "prefix": 0
+            }
+          },
+          "stringTable": [
+            "arkworks-exampl ()",
+            "arkworks-exampl+0x5f31e3af1e85 ()",
+            "arkworks-exampl+0x7faa5b22a28b ()",
+            "arkworks-exampl+0x5f31e3be5dc7 ()",
+            "arkworks-exampl+0x5f31e3da3a42 ()",
+            "arkworks-exampl+0x7faa5b2ad7f2 ()",
+            "arkworks-exampl+0x7faa5b2ac51a ()",
+            "asm_exc_page_fault_[k] ( (/proc/kallsyms))",
+            "exc_page_fault_[k] ( (/proc/kallsyms))",
+            "do_user_addr_fault_[k] ( (/proc/kallsyms))",
+            "handle_mm_fault_[k] ( (/proc/kallsyms))",
+            "__handle_mm_fault_[k] ( (/proc/kallsyms))",
+            "handle_pte_fault_[k] ( (/proc/kallsyms))",
+            "do_anonymous_page_[k] ( (/proc/kallsyms))",
+            "alloc_anon_folio_[k] ( (/proc/kallsyms))",
+            "vma_alloc_folio_noprof_[k] ( (/proc/kallsyms))",
+            "folio_alloc_mpol_noprof_[k] ( (/proc/kallsyms))",
+            "alloc_pages_mpol_noprof_[k] ( (/proc/kallsyms))",
+            "__alloc_pages_noprof_[k] ( (/proc/kallsyms))",
+            "arkworks-exampl+0x5f31e3c602c0 ()",
+            "arkworks-exampl+0x5f31e3e60fb2 ()",
+            "arkworks-exampl+0x7faa5b32725d ()",
+            "entry_SYSCALL_64_after_hwframe_[k] ( (/proc/kallsyms))",
+            "do_syscall_64_[k] ( (/proc/kallsyms))",
+            "x64_sys_call_[k] ( (/proc/kallsyms))",
+            "__x64_sys_futex_[k] ( (/proc/kallsyms))",
+            "do_futex_[k] ( (/proc/kallsyms))",
+            "futex_wait_[k] ( (/proc/kallsyms))",
+            "__futex_wait_[k] ( (/proc/kallsyms))",
+            "futex_wait_queue_[k] ( (/proc/kallsyms))",
+            "schedule_[k] ( (/proc/kallsyms))",
+            "__schedule_[k] ( (/proc/kallsyms))",
+            "arkworks-exampl+0x5f31e3c606d2 ()",
+            "arkworks-exampl+0x5f31e3c60252 ()",
+            "CustomName"
+          ],
+          "tid": 96902,
+          "unregisterTime": null
+        }
+      ]
+    }
+  ],
+  "threads": [
+  ]
+}
