@@ -517,6 +517,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "debugid"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
+dependencies = [
+ "uuid",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1006,6 +1015,7 @@ dependencies = [
  "blazesym",
  "bytes",
  "clap",
+ "debugid",
  "env_logger",
  "futures",
  "itertools 0.14.0",

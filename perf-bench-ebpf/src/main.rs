@@ -65,7 +65,7 @@ static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(102400, 0);
 #[map(name = "THREAD_TIMING")]
 static mut THREAD_TIMING: HashMap<i32, ThreadTimingData> = HashMap::with_max_entries(1024, 0);
 
-static SAMPLE_PERIOD_NS: u64 = 999999;
+static SAMPLE_PERIOD_NS: u64 = 999999999;
 const PARENT_COMM_OFFSET: usize = 8;
 const PARENT_PID_OFFSET: usize = 24;
 const CHILD_COMM_OFFSET: usize = 28;
@@ -246,6 +246,7 @@ unsafe fn try_trace_uprobe_entry(ctx: &ProbeContext) -> Result<i32, c_long> {
     let comm = ctx.command()?;
 
     let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    // current time since boot in nanoseconds
     let now = bpf_ktime_get_ns();
     info!(ctx, "entry updated {} {} {}", pid, tid, comm_str);
     let info = ProcessExecEvent {
@@ -274,6 +275,7 @@ unsafe fn try_trace_uprobe_exit(ctx: &RetProbeContext) -> Result<i32, c_long> {
     let pid = ctx.tgid() as pid_t;
     let comm = ctx.command()?;
 
+    // current time since boot in nanoseconds
     let now = bpf_ktime_get_ns();
     if let Some(exec_event) = unsafe { PROBED_PID_MAP.get(&0) } {
         let comm_str = unsafe { core::str::from_utf8_unchecked(&exec_event.comm) };
@@ -321,6 +323,8 @@ pub unsafe fn try_sched_switch(ctx: TracePointContext) -> Result<u32, i64> {
             .offset(offset_of!(trace_event_raw_sched_switch, next_pid) as isize)
             as *const pid_t,
     )?;
+
+    // current time since boot in nanoseconds
     let now = bpf_ktime_get_ns();
 
     if prev_pid != 0 {
@@ -393,6 +397,7 @@ pub fn cpu_clock(ctx: PerfEventContext) -> Result<u32, i64> {
     }
 
     let cpu = unsafe { bpf_get_smp_processor_id() };
+    // current time since boot in nanoseconds
     let now = unsafe { bpf_ktime_get_ns() };
     // let comm: [u8; 16] = match bpf_get_current_comm() {
     //     // Ok(comm) => unsafe { core::mem::transmute(comm) },

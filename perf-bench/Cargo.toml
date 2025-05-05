@@ -12,8 +12,9 @@ aya-log = { workspace = true }
 addr2line = { workspace = true }
 blazesym = { workspace = true }
 bytes = { workspace = true }
-env_logger = { workspace = true }
 clap = { workspace = true, features = ["std", "derive"] }
+env_logger = { workspace = true }
+debugid = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 libc = { workspace = true }

@@ -9,12 +9,16 @@ use blazesym::Pid;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    f64,
+};
 use uuid::Uuid;
 
 use std::cmp::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::markers::*;
 use crate::symbols::StackFrameInfo;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
@@ -110,33 +114,54 @@ pub struct ProfileBuilder {
     interval: Duration,
     libs: Vec<Lib>,
     threads: HashMap<u32, ThreadBuilder>,
-    start_time: f64,       // as milliseconds since unix epoch
-    end_time: Option<f64>, // as milliseconds since start_time
+    start_time: Instant,
+    start_time_system: SystemTime,
+    // start_time: f64,       // as milliseconds since unix epoch
+    end_time: Option<Instant>, // as milliseconds since start_time
     command_name: String,
     subprocesses: Vec<ProfileBuilder>,
 }
 
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+pub struct StringIndex(u32);
+
 impl ProfileBuilder {
-    pub fn new(start_time: Instant, command_name: &str, pid: u32, interval: Duration) -> Self {
-        let now_instant = Instant::now();
-        let now_system = SystemTime::now();
-        let duration_before_now = now_instant.duration_since(start_time);
-        let start_time_system = now_system - duration_before_now;
-        let duration_since_unix_epoch = start_time_system.duration_since(UNIX_EPOCH).unwrap();
+    pub fn new(
+        start_time: Instant,
+        start_time_system: SystemTime,
+        command_name: &str,
+        pid: u32,
+        interval: Duration,
+    ) -> Self {
+        // let now_instant = Instant::now();
+        // let now_system = SystemTime::now();
+        // let duration_before_now = now_instant.duration_since(start_time);
+        // let start_time_system = now_system - duration_before_now;
+        // let duration_since_unix_epoch = start_time_system.duration_since(UNIX_EPOCH).unwrap();
         ProfileBuilder {
             pid,
             interval,
             threads: HashMap::new(),
             libs: Vec::new(),
-            start_time: duration_since_unix_epoch.as_secs_f64() * 1000.0,
+            // start_time: duration_since_unix_epoch.as_secs_f64() * 1000.0,
+            start_time,
+            start_time_system,
             end_time: None,
             command_name: command_name.to_owned(),
             subprocesses: Vec::new(),
         }
     }
 
-    pub fn set_end_time(&mut self, duration_since_start: Duration) {
-        self.end_time = Some(duration_since_start.as_secs_f64() * 1000.0);
+    pub fn set_start_time(&mut self, start_time: Instant) {
+        self.start_time = start_time;
+    }
+
+    pub fn set_end_time(&mut self, end_time: Instant) {
+        self.end_time = Some(end_time);
+    }
+
+    pub fn set_interval(&mut self, interval: Duration) {
+        self.interval = interval;
     }
 
     pub fn add_lib(
@@ -173,7 +198,28 @@ impl ProfileBuilder {
         self.subprocesses.push(profile_builder);
     }
 
+    fn collect_marker_schemas(&self) -> HashMap<&'static str, MarkerSchema> {
+        let mut marker_schemas = HashMap::new();
+        for thread in self.threads.values() {
+            marker_schemas.extend(thread.marker_schemas.clone().into_iter());
+        }
+        for process in &self.subprocesses {
+            marker_schemas.extend(process.collect_marker_schemas().into_iter());
+        }
+        marker_schemas
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
+        let start_time_ms_since_unix_epoch = self
+            .start_time_system
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            * 1000.0;
+
+        let end_time_ms_since_start = self
+            .end_time
+            .map(|end_time| to_profile_timestamp(end_time, self.start_time));
         let mut sorted_threads: Vec<_> = self.threads.iter().collect();
         sorted_threads.sort_by(|(_, a), (_, b)| {
             if let Some(ordering) = a.get_start_time().partial_cmp(&b.get_start_time()) {
@@ -189,7 +235,7 @@ impl ProfileBuilder {
         });
         let threads: Vec<Value> = sorted_threads
             .into_iter()
-            .map(|(_, thread)| thread.to_json(&self.command_name))
+            .map(|(_, thread)| thread.to_json(&self.command_name, self.start_time))
             .collect();
         let mut sorted_libs: Vec<_> = self.libs.iter().collect();
         sorted_libs.sort_by_key(|l| l.start_address);
@@ -206,11 +252,14 @@ impl ProfileBuilder {
         });
 
         let subprocesses: Vec<Value> = sorted_subprocesses.iter().map(|p| p.to_json()).collect();
+        let mut marker_schemas: Vec<MarkerSchema> =
+            self.collect_marker_schemas().into_values().collect();
+        marker_schemas.sort_by_key(|schema| schema.type_name);
         json!({
             "meta": {
-                "version": 14,
-                "startTime": self.start_time,
-                "shutdownTime": self.end_time,
+                "version": 24,
+                "startTime": start_time_ms_since_unix_epoch,
+                "shutdownTime": end_time_ms_since_start,
                 "pausedRanges": [],
                 "product": self.command_name,
                 "interval": self.interval.as_secs_f64() * 1000.0,
@@ -221,7 +270,8 @@ impl ProfileBuilder {
                     "time": "ms",
                     "eventDelay": "ms",
                     "threadCPUDelta": "µs"
-                }
+                },
+                "markerSchema": marker_schemas,
             },
             "libs": libs,
             "threads": threads,
@@ -230,18 +280,24 @@ impl ProfileBuilder {
     }
 }
 
+fn to_profile_timestamp(instant: Instant, process_start: Instant) -> f64 {
+    (instant - process_start).as_secs_f64() * 1000.0
+}
+
 #[derive(Debug)]
 pub struct ThreadBuilder {
     pid: u32,
     index: u32,
     name: Option<String>,
-    start_time: f64,
-    end_time: Option<f64>,
+    start_time: Instant,
+    end_time: Option<Instant>,
     is_main: bool,
     is_libdispatch_thread: bool,
     stack_table: StackTable,
     frame_table: FrameTable,
     samples: SampleTable,
+    markers: MarkerTable,
+    marker_schemas: HashMap<&'static str, MarkerSchema>,
     string_table: StringTable,
 }
 
@@ -249,7 +305,7 @@ impl ThreadBuilder {
     pub fn new(
         pid: u32,
         thread_index: u32,
-        start_time: f64,
+        start_time: Instant,
         is_main: bool,
         is_libdispatch_thread: bool,
     ) -> Self {
@@ -264,11 +320,17 @@ impl ThreadBuilder {
             stack_table: StackTable::new(),
             frame_table: FrameTable::new(),
             samples: SampleTable(Vec::new()),
+            markers: MarkerTable::new(),
+            marker_schemas: HashMap::new(),
             string_table: StringTable::new(),
         }
     }
 
-    pub fn get_start_time(&self) -> f64 {
+    pub fn set_start_time(&mut self, start_time: Instant) {
+        self.start_time = start_time;
+    }
+
+    pub fn get_start_time(&self) -> Instant {
         self.start_time
     }
 
@@ -284,10 +346,14 @@ impl ThreadBuilder {
         self.index
     }
 
+    pub fn handle_for_string(&mut self, s: &str) -> usize {
+        self.string_table.index_for_string(s)
+    }
+
     pub fn add_sample(
         &mut self,
         timestamp: f64,
-        stack_frames: &Vec<StackFrameInfo>,
+        stack_frames: &[StackFrameInfo],
         cpu_delta: u64,
     ) -> Option<usize> {
         let stack_index = self.stack_index_for_frames(stack_frames);
@@ -312,7 +378,27 @@ impl ThreadBuilder {
         });
     }
 
-    pub fn notify_dead(&mut self, end_time: f64) {
+    /// Main marker API to add a new marker to profiler buffer.
+    pub fn add_marker<T: ProfilerMarker>(
+        &mut self,
+        name: &str,
+        marker: T,
+        start_time: f64,
+        end_time: f64,
+    ) {
+        self.marker_schemas
+            .entry(T::MARKER_TYPE_NAME)
+            .or_insert_with(T::schema);
+        let name_string_index = self.string_table.index_for_string(name);
+        self.markers.0.push(Marker {
+            name_string_index,
+            start_time,
+            end_time,
+            data: marker.json_marker_data(),
+        })
+    }
+
+    pub fn notify_dead(&mut self, end_time: Instant) {
         self.end_time = Some(end_time);
     }
 
@@ -329,7 +415,11 @@ impl ThreadBuilder {
             .index_for_frame(&mut self.string_table, frame)
     }
 
-    fn to_json(&self, process_name: &str) -> Value {
+    fn to_json(&self, process_name: &str, process_start: Instant) -> Value {
+        let register_time = to_profile_timestamp(self.start_time, process_start);
+        let unregister_time = self
+            .end_time
+            .map(|end_time| to_profile_timestamp(end_time, process_start));
         let name = if self.is_main {
             // https://github.com/firefox-devtools/profiler/issues/2508
             "GeckoMain".to_string()
@@ -340,25 +430,19 @@ impl ThreadBuilder {
         } else {
             format!("Thread <{}>", self.index)
         };
+        let markers = self.markers.to_json(process_start);
         json!({
             "name": name,
             "tid": self.index,
             "pid": self.pid,
             "processType": "default",
             "processName": process_name,
-            "registerTime": self.start_time,
-            "unregisterTime": self.end_time,
+            "registerTime": register_time,
+            "unregisterTime": unregister_time,
             "frameTable": self.frame_table.to_json(),
             "stackTable": self.stack_table.to_json(),
             "samples": self.samples.to_json(),
-            "markers": {
-                "schema": {
-                    "name": 0,
-                    "time": 1,
-                    "data": 2
-                },
-                "data": []
-            },
+            "markers": markers,
             "stringTable": self.string_table.to_json()
         })
     }
@@ -500,11 +584,12 @@ impl FrameTable {
             .frames
             .iter()
             .map(|(location, category)| {
-                // TODO: Determine category
+                let inner_window_id = 0;
                 let subcategory = 0;
                 json!([
                     *location,
                     false,
+                    inner_window_id,
                     null,
                     null,
                     null,
@@ -516,14 +601,15 @@ impl FrameTable {
             .collect();
         json!({
             "schema": {
+                "category": 7,
+                "column": 6,
+                "implementation": 3,
+                "innerWindowID": 2,
+                "line": 5,
                 "location": 0,
+                "optimizations": 4,
                 "relevantForJS": 1,
-                "implementation": 2,
-                "optimizations": 3,
-                "line": 4,
-                "column": 5,
-                "category": 6,
-                "subcategory": 7,
+                "subcategory": 8
             },
             "data": data
         })
@@ -592,5 +678,66 @@ impl StringTable {
                 .map(|s| Value::String(s.clone()))
                 .collect(),
         )
+    }
+}
+
+#[repr(u8)]
+enum Phase {
+    Instant = 0,
+    Interval = 1,
+    IntervalStart = 2,
+    IntervalEnd = 3,
+}
+
+struct MarkerTableDataValue<'a> {
+    name_string_index: usize,
+    start: f64,
+    end: f64,
+    phase: u8,
+    data: &'a Value,
+}
+
+#[derive(Debug, Clone)]
+struct Marker {
+    name_string_index: usize,
+    start_time: f64,
+    end_time: f64,
+    data: Value,
+}
+
+impl Marker {
+    fn to_json(&self) -> Value {
+        json!([
+            self.name_string_index,
+            self.start_time,
+            self.end_time,
+            Phase::Interval as u8,
+            &0,
+            &self.data
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct MarkerTable(Vec<Marker>);
+
+impl MarkerTable {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn to_json(&self, process_start: Instant) -> Value {
+        let data: Vec<Value> = self.0.iter().map(|m| m.to_json()).collect();
+        json!({
+            "schema": {
+                "name": 0,
+                "startTime": 1,
+                "endTime": 2,
+                "phase": 3,
+                "category": 4,
+                "data": 5,
+            },
+            "data": data
+        })
     }
 }
