@@ -5,18 +5,22 @@ use aya::{
 };
 use bytes::BytesMut;
 use clap::Parser;
+use dashmap::DashMap;
 use futures::{future::join_all, join};
 use itertools::Itertools;
 use object::{Object, ObjectSection, ObjectSymbol, SectionKind};
-use perf_bench::gecko_profile::{
-    MarkerDynamicField, MarkerFieldFormat, MarkerLocation, MarkerSchema, MarkerSchemaField,
-    MarkerStaticField, MarkerTiming, ProfileBuilder, ProfilerMarker, TextMarker, ThreadBuilder,
+use perf_bench::{
+    gecko_profile::{
+        MarkerDynamicField, MarkerFieldFormat, MarkerLocation, MarkerSchema, MarkerSchemaField,
+        MarkerStaticField, ProfileBuilder, ProfilerMarker, ThreadBuilder,
+    },
+    symbolicate_stack_trace,
 };
-use perf_bench::{profiler::Profiler, CliInputs, Sample2, StackInfo, Thread};
+use perf_bench::{CliInputs, Sample2, StackInfo, Thread};
 use proc_maps::MapRange;
 use procfs::process::Process;
+use rayon::prelude::*;
 use rustc_demangle::demangle;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::to_writer;
 use std::{cmp, io::Read};
@@ -24,10 +28,10 @@ use std::{
     collections::{HashMap, HashSet},
     convert::{TryFrom, TryInto},
     env,
-    fs::{self, File},
-    io::{BufReader, BufWriter},
+    fs::File,
+    io::BufWriter,
     ops::Range,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -40,7 +44,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use perf_bench_common::{CommData, ProcessExecEvent, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
+use perf_bench_common::{ProcessExecEvent, Sample, SAMPLE_PERIOD};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -157,7 +161,6 @@ async fn main() -> anyhow::Result<()> {
 
     // This will raise scheduled events on each CPU at 1000000 HZ, triggered by the kernel based
     // on clock ticks.
-    const SAMPLE_PERIOD: u64 = 999999999;
     let program_perf_event: &mut PerfEvent =
         ebpf_guard.program_mut("cpu_clock").unwrap().try_into()?;
     program_perf_event.load()?;
@@ -173,8 +176,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut perf_array = AsyncPerfEventArray::try_from(ebpf_guard.take_map("SAMPLES").unwrap())?;
     let stacks_traces = StackTraceMap::try_from(ebpf_guard.take_map("STACK_TRACES").unwrap())?;
-
-    let mut profiler = Profiler::new();
 
     let (tx_pids, mut rx_pids) = mpsc::channel(32);
     let (termination_signal_sender, rx) = watch::channel(false);
@@ -364,7 +365,6 @@ async fn main() -> anyhow::Result<()> {
         &stacks_traces,
         proc_maps_by_pid?,
         probed_pid_info.1,
-        &mut profiler,
     );
     Ok(())
 }
@@ -429,8 +429,7 @@ fn save_to_profile(
     threads: Vec<Thread>,
     stack_traces: &StackTraceMap<MapData>,
     proc_maps_by_pid: HashMap<i32, Vec<MapRange>>,
-    probled_pid_info: ProcessExecEvent,
-    profiler: &mut Profiler,
+    probed_pid_info: ProcessExecEvent,
 ) {
     let mut root_profile_builder = ProfileBuilder::new(
         start_time,
@@ -453,8 +452,8 @@ fn save_to_profile(
         start_timestamp_ns,
         kernel_threads,
         stack_traces,
-        probled_pid_info,
-        profiler,
+        probed_pid_info,
+        None,
     );
 
     for (pid, threads) in user_threads_by_pid {
@@ -465,17 +464,20 @@ fn save_to_profile(
             pid as u32,
             Duration::from_millis(1),
         );
-        if let Some(map_ranges) = proc_maps_by_pid.get(&pid) {
+        let map_ranges = if let Some(map_ranges) = proc_maps_by_pid.get(&pid) {
             add_shared_libraries_to_profile(&mut process_profile_builder, map_ranges);
-        }
+            Some(map_ranges)
+        } else {
+            None
+        };
         add_threads_to_profile(
             &mut process_profile_builder,
             start_time,
             start_timestamp_ns,
             threads,
             stack_traces,
-            probled_pid_info,
-            profiler,
+            probed_pid_info,
+            map_ranges.map(|v| &**v),
         );
         root_profile_builder.add_subprocess(process_profile_builder);
     }
@@ -491,18 +493,25 @@ fn add_threads_to_profile(
     start_timestamp_ns: u64,
     threads: Vec<Thread>,
     stack_traces: &StackTraceMap<MapData>,
-    probled_pid_info: ProcessExecEvent,
-    profiler: &mut Profiler,
+    probed_pid_info: ProcessExecEvent,
+    map_ranges: Option<&[MapRange]>,
 ) {
-    for thread in threads {
-        profile_builder.add_thread(make_profile_thread(
-            thread,
-            stack_traces,
-            start_time,
-            start_timestamp_ns,
-            probled_pid_info,
-            profiler,
-        ));
+    let processed_thread_map: DashMap<Thread, ThreadBuilder> = DashMap::new();
+    threads.into_par_iter().for_each(|thread| {
+        processed_thread_map
+            .entry(thread.clone())
+            .or_insert(make_profile_thread(
+                thread,
+                stack_traces,
+                start_time,
+                start_timestamp_ns,
+                probed_pid_info,
+                map_ranges,
+            ));
+    });
+
+    for (_key, value) in processed_thread_map.into_iter() {
+        profile_builder.add_thread(value);
     }
 }
 
@@ -511,8 +520,8 @@ fn make_profile_thread(
     stack_traces: &StackTraceMap<MapData>,
     start_time: Instant,
     start_timestamp_ns: u64,
-    probled_pid_info: ProcessExecEvent,
-    profiler: &mut Profiler,
+    probed_pid_info: ProcessExecEvent,
+    map_ranges: Option<&[MapRange]>,
 ) -> ThreadBuilder {
     let mut thread_builder = ThreadBuilder::new(
         thread.pid.unwrap_or(0) as u32,
@@ -521,6 +530,9 @@ fn make_profile_thread(
         thread.pid == Some(thread.tid),
         false,
     );
+    // if thread.pid == Some(thread.tid) {
+    //     println!("{:?}", thread);
+    // }
 
     if let Some(name) = thread.name.clone() {
         thread_builder.set_name(&name);
@@ -538,6 +550,7 @@ fn make_profile_thread(
         // );
         let stack_info = StackInfo {
             tid: thread.tid,
+            pid: thread.pid,
             user_stack_id: sample.user_stack_id,
             kernel_stack_id: sample.kernel_stack_id,
             name: thread.name.clone().unwrap_or("unnamed".to_string()),
@@ -549,32 +562,32 @@ fn make_profile_thread(
                 thread_builder.add_sample_same_stack(timestamp_rel_ms, *stack_index, cpu_delta_us);
             }
             None => {
-                let combined = profiler.get_stack(&stack_info, stack_traces);
+                let combined = symbolicate_stack_trace(&stack_info, stack_traces, map_ranges);
                 // println!("{:?}", combined);
                 let stack_index =
-                    thread_builder.add_sample(timestamp_rel_ms, &combined, cpu_delta_us);
+                    thread_builder.add_sample(timestamp_rel_ms, combined.as_slice(), cpu_delta_us);
                 stack_info_map.insert(stack_info, stack_index);
             }
         }
     }
 
-    if thread.name == Some(comm_to_string(probled_pid_info.comm)) && thread.pid == Some(thread.tid)
-    {
+    if thread.name == Some(comm_to_string(probed_pid_info.comm)) && thread.pid == Some(thread.tid) {
         let timestamp_rel_ns_start =
-            (probled_pid_info.start_time - start_timestamp_ns) as f64 / 1_000_000.0;
+            (probed_pid_info.start_time - start_timestamp_ns) as f64 / 1_000_000.0;
         let timestamp_rel_ns_end =
-            (probled_pid_info.end_time - start_timestamp_ns) as f64 / 1_000_000.0;
+            (probed_pid_info.end_time - start_timestamp_ns) as f64 / 1_000_000.0;
 
-        let uprobe_start_time =
-            bpf_time_to_instant(probled_pid_info.start_time, start_timestamp_ns);
-        let uprobe_end_time = bpf_time_to_instant(probled_pid_info.end_time, start_timestamp_ns);
-        println!("uprobe_start_time: {:?}", uprobe_start_time);
-        println!("uprobe_end_time: {:?}", uprobe_end_time);
+        let uprobe_start_time = bpf_time_to_instant(probed_pid_info.start_time, start_timestamp_ns);
+        let uprobe_end_time = bpf_time_to_instant(probed_pid_info.end_time, start_timestamp_ns);
+        // println!("uprobe_start_time: {:?}", uprobe_start_time);
+        // println!("uprobe_end_time: {:?}", uprobe_end_time);
         thread_builder.add_marker(
             "UProbed",
             CustomMarker {
-                event_name: comm_to_string(probled_pid_info.comm),
-                latency: Duration::from_millis(123),
+                event_name: comm_to_string(probed_pid_info.comm),
+                latency: Duration::from_millis(
+                    probed_pid_info.end_time - probed_pid_info.start_time,
+                ),
             },
             timestamp_rel_ns_start,
             timestamp_rel_ns_end,
@@ -773,7 +786,7 @@ impl ProfilerMarker for CustomMarker {
             type_name: Self::MARKER_TYPE_NAME,
             locations: vec![MarkerLocation::MarkerChart, MarkerLocation::MarkerTable],
             chart_label: None,
-            tooltip_label: Some("Custom tooltip label"),
+            tooltip_label: Some("Total Time"),
             table_label: None,
             fields: vec![
                 MarkerSchemaField::Dynamic(MarkerDynamicField {

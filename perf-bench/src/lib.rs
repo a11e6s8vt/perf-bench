@@ -2,17 +2,11 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub mod cache;
 pub mod gecko_profile;
-pub mod process;
-pub mod profiler;
-pub mod symbols;
+pub mod symbolicate;
 
-pub use cache::*;
 pub use gecko_profile::*;
-pub use process::*;
-pub use profiler::*;
-pub use symbols::*;
+pub use symbolicate::*;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -29,13 +23,14 @@ pub struct CliInputs {
 pub struct StackInfo {
     /// LWP — thread ID (PID of the individual thread, different from TGID if multi-threaded)
     pub tid: i32,
+    pub pid: Option<i32>,
     pub user_stack_id: i64,
     pub kernel_stack_id: i64,
     pub name: String,
     pub is_kernel_thread: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Thread {
     /// LWP — thread ID (PID of the individual thread, different from TGID if multi-threaded)
     pub tid: i32,
@@ -46,7 +41,7 @@ pub struct Thread {
     pub is_kernel_thread: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Sample2 {
     pub timestamp: u64,
     pub cpu_delta: u64,

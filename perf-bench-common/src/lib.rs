@@ -1,5 +1,7 @@
 #![no_std]
 
+pub const SAMPLE_PERIOD: u64 = 9999999;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessExecEvent {

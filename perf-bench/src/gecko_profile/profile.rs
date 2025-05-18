@@ -1,13 +1,4 @@
-use aya::maps::StackTraceMap;
-use aya::util::kernel_symbols;
-use aya::Ebpf;
-use blazesym::symbolize::{
-    source::{Process, Source},
-    CodeInfo, Input, Sym, Symbolize, Symbolized, Symbolizer,
-};
-use blazesym::Pid;
-
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -19,7 +10,7 @@ use std::cmp::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::markers::*;
-use crate::symbols::StackFrameInfo;
+use crate::symbolicate::StackFrameInfo;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
@@ -534,10 +525,10 @@ impl StackTable {
 #[derive(Debug)]
 struct FrameTable {
     // [string_index]
-    frames: Vec<(usize, Category)>,
+    frames: Vec<(usize, Category, usize, usize, usize)>,
 
     // address -> frame index
-    index: BTreeMap<u64, usize>,
+    index: BTreeMap<String, usize>,
 }
 
 impl FrameTable {
@@ -554,9 +545,11 @@ impl FrameTable {
         frame: &StackFrameInfo,
     ) -> usize {
         let frames = &mut self.frames;
-        *self.index.entry(frame.address).or_insert_with(|| {
+        *self.index.entry(frame.id.clone()).or_insert_with(|| {
             let frame_index = frames.len();
             let location_string = frame.fmt_symbol();
+
+            // find symbol category to determine color
             let obj_path = if frame.object_path().is_some() {
                 frame.object_path().unwrap().to_str().unwrap()
             } else {
@@ -568,13 +561,31 @@ impl FrameTable {
                 frame.fmt_object()
             };
             let category = categorize_frame(obj_path, symbol);
-            // println!("Symbol: {:?}", location_string);
-            // println!(
-            //     "Frame Symbols: {:?} {:?} {:?}",
-            //     &frame.symbol, &frame.object_path, &frame.source
-            // );
+
             let location_string_index = string_table.index_for_string(&location_string);
-            frames.push((location_string_index, category));
+
+            let file = if frame.file.is_some() {
+                frame.file.as_ref().unwrap().as_str()
+            } else {
+                "unknown"
+            };
+            let file_idx = string_table.index_for_string(file);
+
+            let line = if frame.line.is_some() {
+                frame.line.unwrap().to_string()
+            } else {
+                "unknown".to_string()
+            };
+            let line_idx = string_table.index_for_string(&line);
+
+            let col = if frame.col.is_some() {
+                frame.col.unwrap().to_string()
+            } else {
+                "unknown".to_string()
+            };
+            let col_idx = string_table.index_for_string(&col);
+
+            frames.push((location_string_index, category, file_idx, line_idx, col_idx));
             frame_index
         })
     }
@@ -583,7 +594,7 @@ impl FrameTable {
         let data: Vec<Value> = self
             .frames
             .iter()
-            .map(|(location, category)| {
+            .map(|(location, category, file, line, col)| {
                 let inner_window_id = 0;
                 let subcategory = 0;
                 json!([
@@ -591,8 +602,9 @@ impl FrameTable {
                     false,
                     inner_window_id,
                     null,
-                    null,
-                    null,
+                    file,
+                    line,
+                    col,
                     null,
                     *category as u8,
                     subcategory
@@ -601,15 +613,16 @@ impl FrameTable {
             .collect();
         json!({
             "schema": {
-                "category": 7,
+                "category": 8,
                 "column": 6,
+                "file": 4,
                 "implementation": 3,
                 "innerWindowID": 2,
                 "line": 5,
                 "location": 0,
-                "optimizations": 4,
+                "optimizations": 7,
                 "relevantForJS": 1,
-                "subcategory": 8
+                "subcategory": 9
             },
             "data": data
         })
@@ -660,15 +673,11 @@ impl StringTable {
     }
 
     pub fn index_for_string(&mut self, s: &str) -> usize {
-        match self.index.get(s) {
-            Some(string_index) => *string_index,
-            None => {
-                let string_index = self.strings.len();
-                self.strings.push(s.to_string());
-                self.index.insert(s.to_string(), string_index);
-                string_index
-            }
-        }
+        *self.index.entry(s.to_string()).or_insert_with(|| {
+            let idx = self.strings.len();
+            self.strings.push(s.to_string());
+            idx
+        })
     }
 
     pub fn to_json(&self) -> Value {

@@ -1,5 +1,2 @@
-# [build]
-# rustflags = ["-Z", "unstable-options", "-C", "link-arg=-nostartfiles"]
-
-# [unstable]
-# build-std = ["core"]
+[build]
+rustflags = ["-C", "force-frame-pointers=yes"]

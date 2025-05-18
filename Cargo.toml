@@ -18,6 +18,7 @@ bytes = { version = "1.10.1" }
 #
 # See https://github.com/clap-rs/clap/blob/61f5ee5/clap_builder/src/lib.rs#L15.
 clap = { version = "4.5.20", default-features = false, features = ["std", "derive"] }
+dashmap = "6.1.0"
 debugid = "0.8.0"
 env_logger = { version = "0.11.5", default-features = false }
 futures = { version = "0.3.31" }
@@ -29,6 +30,7 @@ memoffset = "0.9.1"
 object = "0.36.7"
 proc-maps = "0.4.0"
 procfs = "0.17"
+rayon = "1.10.0"
 rustc-demangle = "0.1.24"
 serde = "1.0.219"
 serde_derive = "1.0.219"

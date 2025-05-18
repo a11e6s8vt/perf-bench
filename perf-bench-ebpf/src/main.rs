@@ -29,7 +29,7 @@ use bindings::{
     trace_event_raw_sched_switch,
 };
 use memoffset::offset_of;
-use perf_bench_common::{CommData, ProcessExecEvent, Sample, SchedSwitchEvent, TaskInfo, ThreadId};
+use perf_bench_common::{ProcessExecEvent, Sample, TaskInfo, SAMPLE_PERIOD};
 use sched_process_fork::trace_event_raw_sched_process_fork;
 
 #[derive(Clone)]
@@ -65,7 +65,6 @@ static mut STACK_TRACES: StackTrace = StackTrace::with_max_entries(102400, 0);
 #[map(name = "THREAD_TIMING")]
 static mut THREAD_TIMING: HashMap<i32, ThreadTimingData> = HashMap::with_max_entries(1024, 0);
 
-static SAMPLE_PERIOD_NS: u64 = 999999999;
 const PARENT_COMM_OFFSET: usize = 8;
 const PARENT_PID_OFFSET: usize = 24;
 const CHILD_COMM_OFFSET: usize = 28;
@@ -115,9 +114,9 @@ fn thread_goes_on(ctx: &impl EbpfContext, pid: i32, tgid: i32, now: u64, comm: &
     let mut timing = get_thread_timing(pid, now, false);
     let sleep_time: u64 = now - timing.last_seen_ts;
     timing.off_cpu_wrapping_counter_ns += sleep_time;
-    let off_cpu_sample_count = timing.off_cpu_wrapping_counter_ns / SAMPLE_PERIOD_NS;
+    let off_cpu_sample_count = timing.off_cpu_wrapping_counter_ns / SAMPLE_PERIOD;
     if off_cpu_sample_count > 0 {
-        timing.off_cpu_wrapping_counter_ns -= off_cpu_sample_count * SAMPLE_PERIOD_NS;
+        timing.off_cpu_wrapping_counter_ns -= off_cpu_sample_count * SAMPLE_PERIOD;
         let sample = Sample {
             cpu,
             timestamp: now,
@@ -244,8 +243,8 @@ unsafe fn try_trace_uprobe_entry(ctx: &ProbeContext) -> Result<i32, c_long> {
     let tid = ctx.pid() as pid_t;
     let pid = ctx.tgid() as pid_t;
     let comm = ctx.command()?;
-
     let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    let cpu = unsafe { bpf_get_smp_processor_id() };
     // current time since boot in nanoseconds
     let now = bpf_ktime_get_ns();
     info!(ctx, "entry updated {} {} {}", pid, tid, comm_str);
@@ -257,6 +256,7 @@ unsafe fn try_trace_uprobe_entry(ctx: &ProbeContext) -> Result<i32, c_long> {
         end_time: 0,
     };
     PROBED_PID_MAP.insert(&0, &info, 0)?;
+    thread_gets_sampled_while_on(ctx, cpu, ctx.pid() as i32, ctx.tgid() as i32, now, comm);
 
     Ok(0)
 }
@@ -274,7 +274,7 @@ unsafe fn try_trace_uprobe_exit(ctx: &RetProbeContext) -> Result<i32, c_long> {
     let tid = ctx.pid() as pid_t;
     let pid = ctx.tgid() as pid_t;
     let comm = ctx.command()?;
-
+    let cpu = unsafe { bpf_get_smp_processor_id() };
     // current time since boot in nanoseconds
     let now = bpf_ktime_get_ns();
     if let Some(exec_event) = unsafe { PROBED_PID_MAP.get(&0) } {
@@ -299,6 +299,7 @@ unsafe fn try_trace_uprobe_exit(ctx: &RetProbeContext) -> Result<i32, c_long> {
     }
 
     let comm_str = unsafe { core::str::from_utf8_unchecked(&comm) };
+    thread_gets_sampled_while_on(ctx, cpu, ctx.pid() as i32, ctx.tgid() as i32, now, comm);
     info!(ctx, "exit updated {}", comm_str);
     Ok(0)
 }
