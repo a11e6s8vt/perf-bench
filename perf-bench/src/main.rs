@@ -36,7 +36,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 #[rustfmt::skip]
-use log::{debug, warn};
+use log::{debug, warn, info};
+use perf_bench_common::{ProcessExecEvent, Sample, SAMPLE_PERIOD};
+use std::sync::OnceLock;
 use tokio::{
     select, signal,
     sync::{mpsc, watch, Mutex},
@@ -44,10 +46,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use perf_bench_common::{ProcessExecEvent, Sample, SAMPLE_PERIOD};
+static UPROBED_NAME: OnceLock<String> = OnceLock::new();
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
     let inputs = CliInputs::parse();
 
     let target_bin = inputs.binary;
@@ -63,13 +66,12 @@ async fn main() -> anyhow::Result<()> {
     for symbol in obj_file.symbols() {
         if let Ok(name) = symbol.name() {
             let demangled_symbol = demangle(name).to_string();
+            info!("failed to initialize eBPF logger: {}", demangled_symbol);
             if target_funcs.iter().any(|p| demangled_symbol.contains(p)) {
                 func_address_map.push((name.to_string(), symbol.address()));
             }
         }
     }
-
-    env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -115,7 +117,10 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
     uprobe_program.load()?;
 
+    let mut uprobed_name = String::new();
     for (func, address_offset) in &func_address_map {
+        // let _ = UPROBED_NAME.set(func.to_owned());
+        uprobed_name.push_str(func);
         uprobe_program.attach(None, *address_offset, &target_bin, None)?;
     }
 
@@ -361,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
         start_time,
         start_timestamp_ns,
         start_time_system,
+        &uprobed_name,
         threads,
         &stacks_traces,
         proc_maps_by_pid?,
@@ -426,6 +432,7 @@ fn save_to_profile(
     start_time: Instant,
     start_timestamp_ns: u64,
     start_time_system: SystemTime,
+    uprobed_name: &String,
     threads: Vec<Thread>,
     stack_traces: &StackTraceMap<MapData>,
     proc_maps_by_pid: HashMap<i32, Vec<MapRange>>,
@@ -450,6 +457,7 @@ fn save_to_profile(
         &mut root_profile_builder,
         start_time,
         start_timestamp_ns,
+        uprobed_name,
         kernel_threads,
         stack_traces,
         probed_pid_info,
@@ -470,10 +478,15 @@ fn save_to_profile(
         } else {
             None
         };
+        info!(
+            "Processing thread: {pid}, num of threads: {}",
+            threads.len()
+        );
         add_threads_to_profile(
             &mut process_profile_builder,
             start_time,
             start_timestamp_ns,
+            &uprobed_name,
             threads,
             stack_traces,
             probed_pid_info,
@@ -491,25 +504,33 @@ fn add_threads_to_profile(
     profile_builder: &mut ProfileBuilder,
     start_time: Instant,
     start_timestamp_ns: u64,
+    uprobed_name: &String,
     threads: Vec<Thread>,
     stack_traces: &StackTraceMap<MapData>,
     probed_pid_info: ProcessExecEvent,
     map_ranges: Option<&[MapRange]>,
 ) {
     let processed_thread_map: DashMap<Thread, ThreadBuilder> = DashMap::new();
-    threads.into_par_iter().for_each(|thread| {
-        processed_thread_map
-            .entry(thread.clone())
-            .or_insert(make_profile_thread(
-                thread,
-                stack_traces,
-                start_time,
-                start_timestamp_ns,
-                probed_pid_info,
-                map_ranges,
-            ));
-    });
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(10)
+        .build()
+        .unwrap();
 
+    pool.install(|| {
+        threads.into_par_iter().for_each(|thread| {
+            processed_thread_map
+                .entry(thread.clone())
+                .or_insert(make_profile_thread(
+                    thread,
+                    stack_traces,
+                    start_time,
+                    start_timestamp_ns,
+                    uprobed_name,
+                    probed_pid_info,
+                    map_ranges,
+                ));
+        });
+    });
     for (_key, value) in processed_thread_map.into_iter() {
         profile_builder.add_thread(value);
     }
@@ -520,6 +541,7 @@ fn make_profile_thread(
     stack_traces: &StackTraceMap<MapData>,
     start_time: Instant,
     start_timestamp_ns: u64,
+    uprobed_name: &String,
     probed_pid_info: ProcessExecEvent,
     map_ranges: Option<&[MapRange]>,
 ) -> ThreadBuilder {
@@ -538,6 +560,11 @@ fn make_profile_thread(
         thread_builder.set_name(&name);
     }
 
+    info!(
+        "Processing thread: {}, num of samples: {}",
+        thread.tid,
+        thread.samples.len()
+    );
     let mut stack_info_map = HashMap::new();
 
     for sample in thread.samples {
@@ -581,10 +608,12 @@ fn make_profile_thread(
         let uprobe_end_time = bpf_time_to_instant(probed_pid_info.end_time, start_timestamp_ns);
         // println!("uprobe_start_time: {:?}", uprobe_start_time);
         // println!("uprobe_end_time: {:?}", uprobe_end_time);
+        let uprobed_default_name = "Uprobed".to_string();
+        // let uprobed_name = UPROBED_NAME.get().unwrap_or(&uprobed_default_name);
         thread_builder.add_marker(
-            "UProbed",
+            uprobed_name,
             CustomMarker {
-                event_name: comm_to_string(probed_pid_info.comm),
+                event_name: uprobed_name.to_string(),
                 latency: Duration::from_millis(
                     probed_pid_info.end_time - probed_pid_info.start_time,
                 ),

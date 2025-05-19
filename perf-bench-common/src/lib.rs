@@ -1,6 +1,6 @@
 #![no_std]
 
-pub const SAMPLE_PERIOD: u64 = 9999999;
+pub const SAMPLE_PERIOD: u64 = 99999999;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
